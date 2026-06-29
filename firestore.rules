@@ -1,0 +1,127 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ID Poisioning prevention
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Email verified check. Checks if email is verified or logged in through trusted Google Provider
+    function isVerifiedUser() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.firebase.sign_in_provider == 'google.com');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Schema Validation Helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'photoURL', 'createdAt'])
+        && data.keys().size() == 5
+        && data.uid is string
+        && data.uid.size() <= 128
+        && data.name is string
+        && data.name.size() <= 128
+        && data.email is string
+        && data.email.size() <= 128
+        && data.photoURL is string
+        && data.photoURL.size() <= 512
+        && data.createdAt == request.time;
+    }
+
+    function isValidAlbum(data) {
+      return data.keys().hasAll(['userId', 'ownedStickers', 'repeatedStickers', 'lastUpdated', 'progressPercent'])
+        && data.keys().size() == 5
+        && data.userId is string
+        && data.userId.size() <= 128
+        && data.ownedStickers is list
+        && data.ownedStickers.size() <= 1000
+        && data.repeatedStickers is list
+        && data.repeatedStickers.size() <= 1000
+        && data.lastUpdated == request.time
+        && data.progressPercent is number
+        && data.progressPercent >= 0
+        && data.progressPercent <= 100;
+    }
+
+    function isValidTradeShare(data) {
+      return data.keys().hasAll(['shareId', 'userId', 'expiresAt', 'isPublic'])
+        && data.keys().size() == 4
+        && data.shareId is string
+        && data.shareId.size() <= 128
+        && data.userId is string
+        && data.userId.size() <= 128
+        && data.expiresAt is timestamp
+        && data.isPublic is bool;
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['userId', 'type', 'description', 'timestamp'])
+        && data.keys().size() == 4
+        && data.userId is string
+        && data.userId.size() <= 128
+        && data.type is string
+        && (data.type == 'stickers_added' || data.type == 'milestone' || data.type == 'trade')
+        && data.description is string
+        && data.description.size() <= 256
+        && data.timestamp == request.time;
+    }
+
+    // Match definitions
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidUser(incoming())
+                       && incoming().uid == existing().uid
+                       && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    match /albums/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidAlbum(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidAlbum(incoming())
+                       && incoming().userId == existing().userId;
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    match /trade_shares/{shareId} {
+      allow get: if isSignedIn() && isValidId(shareId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid && isValidId(shareId);
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && isVerifiedUser() && isValidId(shareId) && isValidTradeShare(incoming());
+      allow update: if isSignedIn() && existing().userId == request.auth.uid && incoming().userId == request.auth.uid && isVerifiedUser() && isValidId(shareId) && isValidTradeShare(incoming())
+                       && incoming().shareId == existing().shareId
+                       && incoming().userId == existing().userId;
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid && isValidId(shareId);
+    }
+
+    match /activity_logs/{logId} {
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid && isValidId(logId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && isVerifiedUser() && isValidId(logId) && isValidActivityLog(incoming());
+      allow update, delete: if false;
+    }
+  }
+}

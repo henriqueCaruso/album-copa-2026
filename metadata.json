@@ -1,0 +1,6 @@
+{
+  "name": "Álbum Copa 2026",
+  "description": "Painel Inteligente e colaborativo do Álbum da Copa do Mundo de 2026. Gerencie figurinhas, use Inteligência Artificial (Gemini Vision) para escanear páginas físicas e encontre matches de trocas perfeitos com amigos.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

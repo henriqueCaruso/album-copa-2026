@@ -1,0 +1,52 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  
+  --color-wc-maroon: #6b0b0b;
+  --color-wc-gold: #d4af37;
+  --color-wc-bg: #0f0303;
+  --color-wc-card: #1a0505;
+  --color-wc-green: #16a34a;
+  --color-wc-light-green: rgba(22, 163, 74, 0.25);
+}
+
+/* Efeito de brilho holográfico premium para as figurinhas especiais */
+.holographic-shine {
+  background: linear-gradient(135deg, #ffe066 0%, #d4af37 25%, #f3e5ab 50%, #d4af37 75%, #ffe066 100%);
+  background-size: 400% 400%;
+  animation: holoShift 8s ease infinite;
+}
+
+/* Efeito de brilho holográfico dourado especial para Troca Perfeita */
+.perfect-trade-shine {
+  background: linear-gradient(135deg, #ffd700 0%, #ff8c00 50%, #ffd700 100%);
+  background-size: 300% 300%;
+  animation: holoShift 4s ease infinite;
+  box-shadow: 0 0 15px rgba(212, 175, 55, 0.6);
+}
+
+@keyframes holoShift {
+  0% { background-position: 0% 50% }
+  50% { background-position: 100% 50% }
+  100% { background-position: 0% 50% }
+}
+
+.smooth-transition {
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Scrollbar Customizada */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0f0303;
+}
+::-webkit-scrollbar-thumb {
+  background: #6b0b0b;
+  border-radius: 10px;
+}

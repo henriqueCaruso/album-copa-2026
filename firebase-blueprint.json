@@ -1,0 +1,72 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique user ID" },
+        "name": { "type": "string", "description": "Display name of the user" },
+        "email": { "type": "string", "description": "User email address" },
+        "photoURL": { "type": "string", "description": "Profile picture URL" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Profile creation timestamp" }
+      },
+      "required": ["uid", "name", "email", "createdAt"]
+    },
+    "Album": {
+      "title": "Album",
+      "description": "User album progress and sticker lists",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The owner user ID" },
+        "ownedStickers": { "type": "array", "description": "Array of sticker IDs that the user possesses" },
+        "repeatedStickers": { "type": "array", "description": "Array of sticker IDs that the user has repeated and wants to trade" },
+        "lastUpdated": { "type": "string", "format": "date-time", "description": "Last modified timestamp" },
+        "progressPercent": { "type": "number", "description": "Calculated completion percentage" }
+      },
+      "required": ["userId", "ownedStickers", "repeatedStickers", "lastUpdated", "progressPercent"]
+    },
+    "TradeShare": {
+      "title": "TradeShare",
+      "description": "Configuration for sharing list with friends",
+      "type": "object",
+      "properties": {
+        "shareId": { "type": "string", "description": "The unique shared token ID" },
+        "userId": { "type": "string", "description": "The user ID of the share owner" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "Token expiration timestamp" },
+        "isPublic": { "type": "boolean", "description": "Whether the share is public or not" }
+      },
+      "required": ["shareId", "userId", "expiresAt", "isPublic"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Historical log of achievements, trades, or additions",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The user ID related to this activity" },
+        "type": { "type": "string", "enum": ["stickers_added", "milestone", "trade"], "description": "Type of activity" },
+        "description": { "type": "string", "description": "Description of the activity" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Time of activity" }
+      },
+      "required": ["userId", "type", "description", "timestamp"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Individual user profiles mapped by UID"
+    },
+    "albums/{userId}": {
+      "schema": "Album",
+      "description": "Individual albums mapped by owner UID"
+    },
+    "trade_shares/{shareId}": {
+      "schema": "TradeShare",
+      "description": "Shared configurations accessible by public shared hash"
+    },
+    "activity_logs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Log of achievements and trade milestones"
+    }
+  }
+}
