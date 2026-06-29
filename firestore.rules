@@ -36,17 +36,9 @@ service cloud.firestore {
 
     // Schema Validation Helpers
     function isValidUser(data) {
-      return data.keys().hasAll(['uid', 'name', 'email', 'photoURL', 'createdAt'])
-        && data.keys().size() == 5
+      return data.keys().hasAll(['uid', 'name', 'email', 'photoURL'])
         && data.uid is string
-        && data.uid.size() <= 128
-        && data.name is string
-        && data.name.size() <= 128
-        && data.email is string
-        && data.email.size() <= 128
-        && data.photoURL is string
-        && data.photoURL.size() <= 512
-        && data.createdAt == request.time;
+        && data.name is string;
     }
 
     function isValidAlbum(data) {
@@ -92,10 +84,26 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(userId);
       allow list: if isOwner(userId) && isValidId(userId);
       allow create: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidUser(incoming());
-      allow update: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidUser(incoming())
-                       && incoming().uid == existing().uid
-                       && incoming().createdAt == existing().createdAt;
+      allow update: if isOwner(userId) && isValidId(userId) && isVerifiedUser();
       allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Subcollection for stickers (only the owner can write, other logged-in users can read to perform trading matchups)
+      match /stickers/{stickerId} {
+        allow read: if isSignedIn() && isValidId(userId) && isValidId(stickerId);
+        allow write: if isOwner(userId) && isValidId(userId) && isValidId(stickerId);
+      }
+
+      // Subcollection for pageScans (only the owner can write/read page completion status)
+      match /pageScans/{pageId} {
+        allow read: if isSignedIn() && isValidId(userId) && isValidId(pageId);
+        allow write: if isOwner(userId) && isValidId(userId) && isValidId(pageId);
+      }
+
+      // Subcollection for user activity logs
+      match /activity/{activityId} {
+        allow read: if isOwner(userId) && isValidId(userId) && isValidId(activityId);
+        allow write: if isOwner(userId) && isValidId(userId) && isValidId(activityId);
+      }
     }
 
     match /albums/{userId} {

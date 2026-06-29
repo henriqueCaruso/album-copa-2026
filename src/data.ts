@@ -130,6 +130,143 @@ export const albumSections: AlbumSection[] = [
   { id: "PAN", name: "🇵🇦 Panamá", prefix: "PAN", stickersCount: 20, group: "L" }
 ];
 
+import { Country, AlbumPage, StickerDefinition } from "./types";
+
+export const prefixToIso2: Record<string, string> = {
+  FWC: "un",
+  CC: "us",
+  MEX: "mx",
+  RSA: "za",
+  KOR: "kr",
+  CZE: "cz",
+  CAN: "ca",
+  BIH: "ba",
+  QAT: "qa",
+  SUI: "ch",
+  BRA: "br",
+  MAR: "ma",
+  HAI: "ht",
+  SCO: "gb-sct",
+  USA: "us",
+  PAR: "py",
+  AUS: "au",
+  TUR: "tr",
+  GER: "de",
+  CUW: "cw",
+  CIV: "ci",
+  ECU: "ec",
+  NED: "nl",
+  JPN: "jp",
+  SWE: "se",
+  TUN: "tn",
+  BEL: "be",
+  EGY: "eg",
+  IRN: "ir",
+  NZL: "nz",
+  ESP: "es",
+  CPV: "cv",
+  KSA: "sa",
+  URU: "uy",
+  FRA: "fr",
+  SEN: "sn",
+  IRQ: "iq",
+  NOR: "no",
+  ARG: "ar",
+  ALG: "dz",
+  AUT: "at",
+  JOR: "jo",
+  POR: "pt",
+  COD: "cd",
+  UZB: "uz",
+  COL: "co",
+  ENG: "gb-eng",
+  CRO: "hr",
+  GHA: "gh",
+  PAN: "pa"
+};
+
+export const countries: Country[] = albumSections.map((sec) => {
+  const prefix = sec.prefix;
+  const iso2 = prefixToIso2[prefix] || "un";
+  const nameParts = sec.name.split(" ");
+  // Extract emoji if present at start
+  const cleanName = nameParts[0].match(/[\uD800-\uDFFF]./) ? nameParts.slice(1).join(" ") : sec.name;
+
+  const pages: AlbumPage[] = [];
+  const stickersCount = sec.stickersCount;
+
+  if (prefix === "CC") {
+    pages.push({
+      id: "CC-PAGE-01",
+      countryId: "CC",
+      title: "Coca-Cola Momentos - Página 1",
+      stickerIds: Array.from({ length: 10 }, (_, i) => `CC_${i + 1}`),
+      order: 1
+    });
+  } else if (prefix === "FWC") {
+    pages.push({
+      id: "FWC-PAGE-01",
+      countryId: "FWC",
+      title: "Especiais & Símbolos - Página 1 (1-9)",
+      stickerIds: Array.from({ length: 9 }, (_, i) => `FWC_${i + 1}`),
+      order: 1
+    });
+    pages.push({
+      id: "FWC-PAGE-02",
+      countryId: "FWC",
+      title: "Especiais & Símbolos - Página 2 (10-18)",
+      stickerIds: Array.from({ length: 9 }, (_, i) => `FWC_${i + 10}`),
+      order: 2
+    });
+  } else {
+    pages.push({
+      id: `${prefix}-PAGE-01`,
+      countryId: prefix,
+      title: `${cleanName} - Página 1 (1-10)`,
+      stickerIds: Array.from({ length: 10 }, (_, i) => `${prefix}_${i + 1}`),
+      order: 1
+    });
+    pages.push({
+      id: `${prefix}-PAGE-02`,
+      countryId: prefix,
+      title: `${cleanName} - Página 2 (11-20)`,
+      stickerIds: Array.from({ length: 10 }, (_, i) => `${prefix}_${i + 11}`),
+      order: 2
+    });
+  }
+
+  return {
+    id: prefix,
+    name: cleanName,
+    iso2: iso2,
+    fifaCode: prefix,
+    group: sec.group,
+    pages: pages,
+    special: sec.special || false
+  };
+});
+
+export const stickersMap: Record<string, StickerDefinition> = {};
+export const pagesMap: Record<string, AlbumPage> = {};
+
+countries.forEach((c) => {
+  c.pages.forEach((page) => {
+    pagesMap[page.id] = page;
+    page.stickerIds.forEach((sid) => {
+      const parts = sid.split("_");
+      const num = parseInt(parts[1], 10);
+      stickersMap[sid] = {
+        id: sid,
+        countryId: c.id,
+        pageId: page.id,
+        number: num,
+        label: `${c.name} ${num}`,
+        type: c.special ? "special" : "player"
+      };
+    });
+  });
+});
+
 export const totalAlbumStickers: string[] = [];
 albumSections.forEach(section => {
   for (let i = 1; i <= section.stickersCount; i++) {
@@ -138,3 +275,4 @@ albumSections.forEach(section => {
 });
 
 export const TOTAL_STICKERS = totalAlbumStickers.length;
+

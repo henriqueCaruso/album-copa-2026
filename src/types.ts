@@ -36,3 +36,32 @@ export interface AlbumSection {
   group: string;
   special?: boolean;
 }
+
+export interface Country {
+  id: string;
+  name: string;
+  iso2: string;
+  fifaCode: string;
+  group: string;
+  flagUrl?: string;
+  pages: AlbumPage[];
+  special?: boolean;
+}
+
+export interface AlbumPage {
+  id: string;
+  countryId: string;
+  title: string;
+  stickerIds: string[];
+  order: number;
+}
+
+export interface StickerDefinition {
+  id: string;
+  countryId: string;
+  pageId: string;
+  number: number;
+  label?: string;
+  type?: "player" | "team" | "special" | "stadium" | "other";
+}
+

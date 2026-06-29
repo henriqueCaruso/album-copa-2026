@@ -1,33 +1,59 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
-  Award, Camera, Share2, Users, Copy, RefreshCw, LogOut, LogIn,
-  CheckCircle, Plus, Minus, Sparkles, TrendingUp, Info, HelpCircle,
-  Search, Filter, ChevronRight, Check, AlertCircle, FileText, ArrowRight,
-  Upload, X, CheckSquare, Square
+  Camera, Share2, Users, Copy, LogOut, LogIn,
+  CheckCircle, Plus, Minus, Sparkles, TrendingUp, HelpCircle,
+  Search, Filter, ChevronRight, Check, AlertCircle, Upload, X
 } from "lucide-react";
 import {
   db, auth, googleProvider, signInWithPopup, signOut,
   handleFirestoreError, OperationType
 } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc, setDoc, onSnapshot, collection, addDoc, serverTimestamp } from "firebase/firestore";
-import { missingFromPhotos, albumSections, totalAlbumStickers, TOTAL_STICKERS } from "./data";
+import {
+  doc, getDoc, setDoc, onSnapshot, collection, writeBatch, serverTimestamp
+} from "firebase/firestore";
+import {
+  countries, pagesMap, stickersMap, totalAlbumStickers, TOTAL_STICKERS, missingFromPhotos, albumSections
+} from "./data";
 import { UserProfile, UserAlbum, TradeShare, ActivityLog } from "./types";
+import { CountryFlag } from "./components/CountryFlag";
+
+type ScanStatus = "available" | "uploading" | "processing" | "reviewing" | "saving" | "completed" | "failed";
+
+interface ReviewSticker {
+  id: string;
+  number: number;
+  label: string;
+  type: "detected" | "uncertain" | "missing" | "owned";
+  reason?: string;
+  confirmed: boolean;
+}
 
 export default function App() {
-  // Auth State
+  // Auth States
   const [user, setUser] = useState<any>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
+  const [showMigrationPrompt, setShowMigrationPrompt] = useState(false);
+  const [migrating, setMigrating] = useState(false);
 
   // Active Navigation Tab
   const [activeTab, setActiveTab] = useState<"album" | "ia" | "stats" | "social">("album");
 
-  // Local album states
-  const [ownedStickers, setOwnedStickers] = useState<string[]>([]);
-  const [repeatedStickers, setRepeatedStickers] = useState<string[]>([]);
+  // Central Database Progress State
+  const [stickerCounts, setStickerCounts] = useState<Record<string, number>>({});
+  const [completedPages, setCompletedPages] = useState<string[]>([]);
   const [loadingAlbum, setLoadingAlbum] = useState(false);
+
+  // Derived arrays for backward compatibility and quick checking
+  const ownedStickers = useMemo(() => {
+    return Object.keys(stickerCounts).filter((id) => stickerCounts[id] >= 1);
+  }, [stickerCounts]);
+
+  const repeatedStickers = useMemo(() => {
+    return Object.keys(stickerCounts).filter((id) => stickerCounts[id] >= 2);
+  }, [stickerCounts]);
 
   // Filters and UI controls
   const [searchQuery, setSearchQuery] = useState("");
@@ -41,25 +67,22 @@ export default function App() {
   const [generatingShare, setGeneratingShare] = useState(false);
   const [friendShareId, setFriendShareId] = useState("");
   
-  // Friend swap matchup states (when viewing a shared link)
+  // Friend swap matchup states
   const [viewingFriend, setViewingFriend] = useState(false);
   const [friendProfile, setFriendProfile] = useState<UserProfile | null>(null);
   const [friendAlbum, setFriendAlbum] = useState<UserAlbum | null>(null);
   const [loadingFriend, setLoadingFriend] = useState(false);
 
   // IA Vision states
-  const [selectedPrefix, setSelectedPrefix] = useState("BRA");
+  const [selectedPageId, setSelectedPageId] = useState("BRA-PAGE-01");
+  const [scanStatus, setScanStatus] = useState<ScanStatus>("available");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<{
-    prefix: string;
-    filled: number[];
-    empty: number[];
-  } | null>(null);
-
-  // Activity logs
-  const [activities, setActivities] = useState<ActivityLog[]>([]);
+  const [scanErrorMsg, setScanErrorMsg] = useState<string | null>(null);
+  
+  // Scanned / Review list
+  const [reviewStickers, setReviewStickers] = useState<ReviewSticker[]>([]);
+  const [scanWarnings, setScanWarnings] = useState<string[]>([]);
 
   // Toast state
   const [toast, setToast] = useState<{ message: string; type: "success" | "warn" | "error" | "info" } | null>(null);
@@ -71,7 +94,12 @@ export default function App() {
     }, 4000);
   };
 
-  // 1. Listen for Auth State changes
+  // Get all album pages in order
+  const allPagesList = useMemo(() => {
+    return countries.flatMap((c) => c.pages);
+  }, []);
+
+  // Sync auth state and load real-time listeners
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
@@ -80,44 +108,73 @@ export default function App() {
         const userDocRef = doc(db, "users", currentUser.uid);
         try {
           const userSnap = await getDoc(userDocRef);
-          let userProfile: UserProfile;
+          let userProfile: any;
           if (!userSnap.exists()) {
             userProfile = {
               uid: currentUser.uid,
               name: currentUser.displayName || "Colecionador",
               email: currentUser.email || "",
               photoURL: currentUser.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80",
-              createdAt: new Date().toISOString()
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              migrated: false
             };
             await setDoc(userDocRef, userProfile);
           } else {
-            userProfile = userSnap.data() as UserProfile;
+            userProfile = userSnap.data();
           }
           setProfile(userProfile);
 
-          // Listen in real-time to this user's album
-          const albumDocRef = doc(db, "albums", currentUser.uid);
-          const unsubAlbum = onSnapshot(albumDocRef, (albumSnap) => {
-            if (albumSnap.exists()) {
-              const albumData = albumSnap.data() as UserAlbum;
-              setOwnedStickers(albumData.ownedStickers || []);
-              setRepeatedStickers(albumData.repeatedStickers || []);
-              localStorage.setItem("copa2026_owned", JSON.stringify(albumData.ownedStickers || []));
-              localStorage.setItem("copa2026_repeated", JSON.stringify(albumData.repeatedStickers || []));
-            } else {
-              // Create default from localStorage or default image state
-              initializeDefaultAlbum(currentUser.uid);
+          // Real-time listener for user stickers collection
+          setLoadingAlbum(true);
+          const unsubStickers = onSnapshot(
+            collection(db, "users", currentUser.uid, "stickers"),
+            (querySnap) => {
+              const counts: Record<string, number> = {};
+              querySnap.forEach((docSnap) => {
+                const data = docSnap.data();
+                if (data.stickerId) {
+                  counts[data.stickerId] = data.ownedCount || 0;
+                }
+              });
+              setStickerCounts(counts);
+              setLoadingAlbum(false);
+            },
+            (err) => {
+              handleFirestoreError(err, OperationType.GET, `users/${currentUser.uid}/stickers`);
+              setLoadingAlbum(false);
             }
-          }, (err) => {
-            handleFirestoreError(err, OperationType.GET, `albums/${currentUser.uid}`);
-          });
+          );
 
-          // Fetch or generate an initial share record
+          // Real-time listener for user pageScans collection
+          const unsubPageScans = onSnapshot(
+            collection(db, "users", currentUser.uid, "pageScans"),
+            (querySnap) => {
+              const completed: string[] = [];
+              querySnap.forEach((docSnap) => {
+                const data = docSnap.data();
+                if (data.status === "completed") {
+                  completed.push(docSnap.id);
+                }
+              });
+              setCompletedPages(completed);
+            }
+          );
+
+          // Check if local storage needs migration
+          const localSavedOwned = localStorage.getItem("copa2026_owned");
+          const localSavedOwnedArray = localSavedOwned ? JSON.parse(localSavedOwned) : [];
+          if (localSavedOwnedArray.length > 0 && !userProfile.migrated) {
+            setShowMigrationPrompt(true);
+          }
+
+          // Fetch user share reference
           fetchUserShare(currentUser.uid);
-
           setLoadingAuth(false);
+
           return () => {
-            unsubAlbum();
+            unsubStickers();
+            unsubPageScans();
           };
         } catch (error) {
           console.error("Auth sync error:", error);
@@ -125,21 +182,49 @@ export default function App() {
         }
       } else {
         setProfile(null);
+        setCompletedPages([]);
         setLoadingAuth(false);
-        // Load from local storage for offline guest mode
+        
+        // Load offline Guest profile from local storage
         const savedOwned = localStorage.getItem("copa2026_owned");
         const savedRepeated = localStorage.getItem("copa2026_repeated");
-        if (savedOwned) setOwnedStickers(JSON.parse(savedOwned));
-        else generateInitialPhotoStateLocal();
+        
+        const counts: Record<string, number> = {};
+        if (savedOwned) {
+          const ownedArr: string[] = JSON.parse(savedOwned);
+          ownedArr.forEach((id) => {
+            counts[id] = 1;
+          });
+        } else {
+          // Fill from initial photo states
+          totalAlbumStickers.forEach((id) => {
+            const [prefix, numStr] = id.split("_");
+            const num = parseInt(numStr, 10);
+            const missingList = missingFromPhotos[prefix];
+            if (!missingList || !missingList.includes(num)) {
+              counts[id] = 1;
+            } else {
+              counts[id] = 0;
+            }
+          });
+          const initialOwned = Object.keys(counts).filter((id) => counts[id] >= 1);
+          localStorage.setItem("copa2026_owned", JSON.stringify(initialOwned));
+        }
 
-        if (savedRepeated) setRepeatedStickers(JSON.parse(savedRepeated));
+        if (savedRepeated) {
+          const repeatedArr: string[] = JSON.parse(savedRepeated);
+          repeatedArr.forEach((id) => {
+            counts[id] = 2;
+          });
+        }
+        setStickerCounts(counts);
       }
     });
 
     return () => unsubscribe();
   }, []);
 
-  // Check URL parameters for Friend Share IDs on startup
+  // Check URL parameters for Shared Code on startup
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const shareId = params.get("share");
@@ -149,17 +234,14 @@ export default function App() {
     }
   }, []);
 
+  // Navigation smoothly to Country panel
   const navigateToCountry = (id: string, group: string) => {
-    // Set group filter to "all" to make sure the selected country is visible
     setActiveGroupFilter("all");
-    
-    // Set highlighted state
     setHighlightedCountry(id);
     setTimeout(() => {
       setHighlightedCountry(null);
     }, 2000);
 
-    // Scroll smoothly to target element
     setTimeout(() => {
       const element = document.getElementById(`country-${id}`);
       if (element) {
@@ -170,7 +252,6 @@ export default function App() {
 
   const fetchUserShare = async (userId: string) => {
     try {
-      // Find if they already have a share token
       const shareDocRef = doc(db, "trade_shares", userId);
       const shareSnap = await getDoc(shareDocRef);
       if (shareSnap.exists()) {
@@ -181,57 +262,44 @@ export default function App() {
     }
   };
 
-  const initializeDefaultAlbum = async (userId: string) => {
-    setLoadingAlbum(true);
-    // Prefer matching what we have in localStorage
-    const localSavedOwned = localStorage.getItem("copa2026_owned");
-    const localSavedRepeated = localStorage.getItem("copa2026_repeated");
+  // Safe manual adjustments (Counter increase/decrease)
+  const adjustStickerCount = async (stickerId: string, delta: number) => {
+    const currentCount = stickerCounts[stickerId] || 0;
+    const nextCount = Math.max(0, currentCount + delta);
 
-    let initialOwned: string[] = [];
-    if (localSavedOwned) {
-      initialOwned = JSON.parse(localSavedOwned);
+    if (nextCount === currentCount) return;
+
+    // Optimistic client-side state update
+    const nextCounts = { ...stickerCounts, [stickerId]: nextCount };
+    setStickerCounts(nextCounts);
+
+    const nextOwned = Object.keys(nextCounts).filter((id) => nextCounts[id] >= 1);
+    const nextRepeated = Object.keys(nextCounts).filter((id) => nextCounts[id] >= 2);
+
+    localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
+    localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
+
+    if (user) {
+      try {
+        const stickerRef = doc(db, "users", user.uid, "stickers", stickerId);
+        await setDoc(stickerRef, {
+          stickerId,
+          ownedCount: nextCount,
+          isOwned: nextCount >= 1,
+          isDuplicate: nextCount >= 2,
+          source: "manual",
+          updatedAt: serverTimestamp()
+        });
+      } catch (err) {
+        console.error("Error saving sticker manual adjustment:", err);
+        showToast("Erro ao sincronizar alteração na nuvem.", "error");
+      }
     } else {
-      // Fill from default photos
-      initialOwned = totalAlbumStickers.filter((id) => {
-        const [prefix, numStr] = id.split("_");
-        const num = parseInt(numStr, 10);
-        const missingList = missingFromPhotos[prefix];
-        if (!missingList) return true;
-        return !missingList.includes(num);
-      });
+      showToast(
+        `Quantidade de ${stickerId.replace("_", " ")} atualizada para ${nextCount} (Salvo localmente).`,
+        "info"
+      );
     }
-
-    const initialRepeated: string[] = localSavedRepeated ? JSON.parse(localSavedRepeated) : [];
-    
-    const albumData: UserAlbum = {
-      userId,
-      ownedStickers: initialOwned,
-      repeatedStickers: initialRepeated,
-      lastUpdated: new Date().toISOString(),
-      progressPercent: Math.round((initialOwned.length / TOTAL_STICKERS) * 100)
-    };
-
-    try {
-      await setDoc(doc(db, "albums", userId), albumData);
-      setOwnedStickers(initialOwned);
-      setRepeatedStickers(initialRepeated);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `albums/${userId}`);
-    } finally {
-      setLoadingAlbum(false);
-    }
-  };
-
-  const generateInitialPhotoStateLocal = () => {
-    const initialOwned = totalAlbumStickers.filter((id) => {
-      const [prefix, numStr] = id.split("_");
-      const num = parseInt(numStr, 10);
-      const missingList = missingFromPhotos[prefix];
-      if (!missingList) return true;
-      return !missingList.includes(num);
-    });
-    setOwnedStickers(initialOwned);
-    localStorage.setItem("copa2026_owned", JSON.stringify(initialOwned));
   };
 
   // Google Provider Login
@@ -258,80 +326,65 @@ export default function App() {
     }
   };
 
-  // Toggle Sticker State (Owned vs Repeated vs Missing)
-  const toggleStickerState = async (stickerId: string) => {
-    const isOwned = ownedStickers.includes(stickerId);
-    const isRepeated = repeatedStickers.includes(stickerId);
+  // Perform safe local storage to cloud migration
+  const handleMigrate = async () => {
+    if (!user) return;
+    setMigrating(true);
+    try {
+      const batch = writeBatch(db);
+      
+      // Save all current local storage counts to user's stickers subcollection
+      Object.keys(stickerCounts).forEach((stickerId) => {
+        const count = stickerCounts[stickerId];
+        if (count > 0) {
+          const docRef = doc(db, "users", user.uid, "stickers", stickerId);
+          batch.set(docRef, {
+            stickerId,
+            ownedCount: count,
+            isOwned: true,
+            isDuplicate: count >= 2,
+            source: "migration",
+            updatedAt: serverTimestamp()
+          });
+        }
+      });
 
-    let nextOwned = [...ownedStickers];
-    let nextRepeated = [...repeatedStickers];
+      // Update user profile migration status
+      const userDocRef = doc(db, "users", user.uid);
+      batch.set(userDocRef, { migrated: true }, { merge: true });
 
-    if (!isOwned) {
-      // Missing -> Owned
-      nextOwned.push(stickerId);
-      showToast(`Figurinha ${stickerId.replace("_", " ")} colada!`, "success");
-    } else if (isOwned && !isRepeated) {
-      // Owned -> Repeated
-      nextRepeated.push(stickerId);
-      showToast(`Figurinha ${stickerId.replace("_", " ")} marcada como repetida!`, "info");
-    } else {
-      // Repeated -> Missing
-      nextOwned = nextOwned.filter((id) => id !== stickerId);
-      nextRepeated = nextRepeated.filter((id) => id !== stickerId);
-      showToast(`Figurinha ${stickerId.replace("_", " ")} removida.`, "warn");
-    }
+      await batch.commit();
 
-    setOwnedStickers(nextOwned);
-    setRepeatedStickers(nextRepeated);
-    
-    // Save locally
-    localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
-    localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
-
-    // Push to Firestore if logged in
-    if (user) {
-      try {
-        const albumData: UserAlbum = {
-          userId: user.uid,
-          ownedStickers: nextOwned,
-          repeatedStickers: nextRepeated,
-          lastUpdated: new Date().toISOString(),
-          progressPercent: Math.round((nextOwned.length / TOTAL_STICKERS) * 100)
-        };
-        await setDoc(doc(db, "albums", user.uid), albumData);
-      } catch (err) {
-        console.error("Error saving album change:", err);
+      if (profile) {
+        setProfile({ ...profile, migrated: true } as any);
       }
+      setShowMigrationPrompt(false);
+      showToast("Seu progresso local foi importado com sucesso para a sua conta!", "success");
+    } catch (err) {
+      console.error("Migration error:", err);
+      showToast("Erro ao importar dados locais para a nuvem.", "error");
+    } finally {
+      setMigrating(false);
     }
   };
 
-  const quickMarkMissing = async (stickerId: string) => {
-    // Force sticker back to missing state directly
-    const nextOwned = ownedStickers.filter(id => id !== stickerId);
-    const nextRepeated = repeatedStickers.filter(id => id !== stickerId);
-
-    setOwnedStickers(nextOwned);
-    setRepeatedStickers(nextRepeated);
-    localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
-    localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
-
-    if (user) {
-      try {
-        await setDoc(doc(db, "albums", user.uid), {
-          userId: user.uid,
-          ownedStickers: nextOwned,
-          repeatedStickers: nextRepeated,
-          lastUpdated: new Date().toISOString(),
-          progressPercent: Math.round((nextOwned.length / TOTAL_STICKERS) * 100)
-        });
-      } catch (e) {
-        console.error(e);
+  const handleIgnoreMigration = async () => {
+    if (!user) return;
+    try {
+      // Mark as migrated to prevent asking again
+      const userDocRef = doc(db, "users", user.uid);
+      await setDoc(userDocRef, { migrated: true }, { merge: true });
+      if (profile) {
+        setProfile({ ...profile, migrated: true } as any);
       }
+      setShowMigrationPrompt(false);
+      showToast("Importação ignorada. Você começou com seu álbum em nuvem vazio.", "info");
+    } catch (e) {
+      console.error(e);
     }
-    showToast(`Figurinha ${stickerId.replace("_", " ")} desmarcada.`, "warn");
   };
 
-  // AI Scanning handlers
+  // AI Scanning Drag & Drop handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
   };
@@ -340,115 +393,276 @@ export default function App() {
     e.preventDefault();
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
-      setUploadedFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      setScanResult(null);
+      validateAndLoadImage(file);
     }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
-      setUploadedFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      setScanResult(null);
+      validateAndLoadImage(file);
     }
   };
 
-  const triggerVisionScan = async () => {
-    if (!uploadedFile) {
-      showToast("Selecione ou tire uma foto primeiro.", "warn");
+  const validateAndLoadImage = (file: File) => {
+    // 1. Check size (limit to 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      showToast("A imagem excede o limite máximo de 10MB.", "error");
+      return;
+    }
+    // 2. Check type
+    if (!file.type.startsWith("image/")) {
+      showToast("O arquivo enviado não é uma imagem válida.", "error");
       return;
     }
 
-    setScanning(true);
-    setScanResult(null);
+    setUploadedFile(file);
+    setPreviewUrl(URL.createObjectURL(file));
+    setScanStatus("available");
+    setScanErrorMsg(null);
+    setReviewStickers([]);
+  };
+
+  // Triggering the upgraded vision scan page by page
+  const triggerVisionScan = async () => {
+    if (!user) {
+      showToast("Por favor, faça login com Google para usar o Leitor IA.", "warn");
+      return;
+    }
+    if (!uploadedFile) {
+      showToast("Selecione ou carregue uma imagem primeiro.", "warn");
+      return;
+    }
+
+    // Guard: completed check
+    if (completedPages.includes(selectedPageId)) {
+      showToast("Você já possui uma leitura válida concluída para esta página.", "error");
+      return;
+    }
+
+    setScanStatus("uploading");
+    setScanErrorMsg(null);
+
+    const pageDef = pagesMap[selectedPageId];
+    if (!pageDef) {
+      setScanStatus("failed");
+      setScanErrorMsg("Página de álbum inválida selecionada.");
+      return;
+    }
 
     const formData = new FormData();
     formData.append("image", uploadedFile);
-    formData.append("prefix", selectedPrefix);
+    formData.append("pageId", selectedPageId);
+    formData.append("stickerIds", pageDef.stickerIds.join(","));
 
     try {
+      setScanStatus("processing");
       const response = await fetch("/api/gemini/analyze", {
         method: "POST",
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error("Erro de processamento da IA.");
+        throw new Error("O servidor retornou um erro ao analisar com Gemini.");
       }
 
-      const data = await response.json();
-      setScanResult(data);
-      showToast("Página escaneada com sucesso pela Visão Artificial!", "success");
-    } catch (error) {
+      const result = await response.json();
+      
+      // Perform strict validation steps
+      if (!result || typeof result !== "object") {
+        throw new Error("Resposta inválida recebida do motor de IA.");
+      }
+
+      const returnedPageId = result.pageId;
+      if (returnedPageId !== selectedPageId) {
+        throw new Error("A IA analisou a página incorreta ou houve um descompasso.");
+      }
+
+      const detections = result.detections || [];
+      const uncertainDetections = result.uncertainDetections || [];
+      const warnings = result.warnings || [];
+
+      setScanWarnings(warnings);
+
+      // Build Review State list
+      const list: ReviewSticker[] = [];
+      pageDef.stickerIds.forEach((sid) => {
+        const parts = sid.split("_");
+        const num = parseInt(parts[1], 10);
+        const label = `${countries.find((c) => c.id === pageDef.countryId)?.name || ""} ${num}`;
+
+        const isAlreadyOwned = ownedStickers.includes(sid);
+
+        if (isAlreadyOwned) {
+          // Already Owned
+          list.push({
+            id: sid,
+            number: num,
+            label,
+            type: "owned",
+            confirmed: true
+          });
+        } else {
+          // Check if detected
+          const det = detections.find((d: any) => d.stickerId === sid);
+          const unc = uncertainDetections.find((u: any) => u.stickerId === sid);
+
+          if (det) {
+            // High confidence detection
+            const conf = Math.max(0, Math.min(1, det.confidence || 0.95));
+            list.push({
+              id: sid,
+              number: num,
+              label,
+              type: "detected",
+              confirmed: conf > 0.85
+            });
+          } else if (unc) {
+            // Uncertain detection
+            list.push({
+              id: sid,
+              number: num,
+              label,
+              type: "uncertain",
+              reason: unc.reason || "Dúvida visual na colagem",
+              confirmed: false // User must manually opt-in
+            });
+          } else {
+            // Missing empty space
+            list.push({
+              id: sid,
+              number: num,
+              label,
+              type: "missing",
+              confirmed: false
+            });
+          }
+        }
+      });
+
+      setReviewStickers(list);
+      setScanStatus("reviewing");
+      showToast("Página analisada! Revise as sugestões da IA antes de salvar.", "success");
+    } catch (error: any) {
       console.error(error);
-      showToast("Falha no escaneamento automático da página.", "error");
-    } finally {
-      setScanning(false);
+      setScanStatus("failed");
+      setScanErrorMsg(error?.message || "Ocorreu uma falha ao escaneamento automático da página.");
+      showToast("Não foi possível concluir a leitura automática.", "error");
     }
   };
 
+  const handleToggleReviewSticker = (id: string) => {
+    setReviewStickers(
+      reviewStickers.map((item) => {
+        if (item.id === id) {
+          return { ...item, confirmed: !item.confirmed };
+        }
+        return item;
+      })
+    );
+  };
+
+  // Commit verified scan to cloud
   const applyScanResult = async () => {
-    if (!scanResult) return;
+    if (!user) return;
+    setScanStatus("saving");
 
-    // Merge scan results with user owned/missing lists
-    const { prefix, filled, empty } = scanResult;
+    try {
+      const pageDef = pagesMap[selectedPageId];
+      const batch = writeBatch(db);
 
-    let nextOwned = [...ownedStickers];
-    let nextRepeated = [...repeatedStickers];
+      const confirmedIds: string[] = [];
+      const rejectedIds: string[] = [];
+      const detectedIds: string[] = [];
+      const uncertainIds: string[] = [];
 
-    // For all 20 stickers of this prefix, if listed in filled: make sure it's in owned
-    filled.forEach((num) => {
-      const stickerId = `${prefix}_${num}`;
-      if (!nextOwned.includes(stickerId)) {
-        nextOwned.push(stickerId);
+      // We process each review item
+      for (const item of reviewStickers) {
+        if (item.type === "detected") detectedIds.push(item.id);
+        if (item.type === "uncertain") uncertainIds.push(item.id);
+
+        if (item.confirmed) {
+          confirmedIds.push(item.id);
+          
+          // Increment or set count to 1 if it wasn't owned
+          const currentCount = stickerCounts[item.id] || 0;
+          const nextCount = Math.max(1, currentCount);
+
+          const stickerRef = doc(db, "users", user.uid, "stickers", item.id);
+          batch.set(stickerRef, {
+            stickerId: item.id,
+            ownedCount: nextCount,
+            isOwned: true,
+            isDuplicate: nextCount >= 2,
+            source: "scan",
+            updatedAt: serverTimestamp()
+          });
+        } else {
+          // If unconfirmed, but was previously owned, we do NOT touch it to avoid breaking pre-existing states
+          // unless user wants to explicitly clear it. Let's keep it safe.
+          if (item.type !== "owned") {
+            rejectedIds.push(item.id);
+          }
+        }
       }
-    });
 
-    // If listed in empty: remove from owned and repeated
-    empty.forEach((num) => {
-      const stickerId = `${prefix}_${num}`;
-      nextOwned = nextOwned.filter((id) => id !== stickerId);
-      nextRepeated = nextRepeated.filter((id) => id !== stickerId);
-    });
+      // Write PageScan record to consume the read permanently
+      const pageScanRef = doc(db, "users", user.uid, "pageScans", selectedPageId);
+      batch.set(pageScanRef, {
+        pageId: selectedPageId,
+        countryId: pageDef.countryId,
+        status: "completed",
+        detectedStickerIds: detectedIds,
+        confirmedStickerIds: confirmedIds,
+        rejectedStickerIds: rejectedIds,
+        uncertainStickerIds: uncertainIds,
+        modelName: "gemini-3.5-flash",
+        imageHash: "",
+        scannedAt: serverTimestamp(),
+        confirmedAt: serverTimestamp(),
+        schemaVersion: 1
+      });
 
-    setOwnedStickers(nextOwned);
-    setRepeatedStickers(nextRepeated);
+      // Save activity log
+      const logRef = doc(collection(db, "users", user.uid, "activity"));
+      batch.set(logRef, {
+        userId: user.uid,
+        type: "stickers_added",
+        description: `Concluiu leitura automática da página ${pageDef.title}.`,
+        timestamp: serverTimestamp()
+      });
 
-    localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
-    localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
+      await batch.commit();
 
-    // Save online
-    if (user) {
-      try {
-        await setDoc(doc(db, "albums", user.uid), {
-          userId: user.uid,
-          ownedStickers: nextOwned,
-          repeatedStickers: nextRepeated,
-          lastUpdated: new Date().toISOString(),
-          progressPercent: Math.round((nextOwned.length / TOTAL_STICKERS) * 100)
-        });
-
-        // Add to activities
-        await addDoc(collection(db, "activity_logs"), {
-          userId: user.uid,
-          type: "stickers_added",
-          description: `Escaneou página do país ${prefix} usando Visão Computacional.`,
-          timestamp: new Date().toISOString()
-        });
-
-      } catch (err) {
-        console.error(err);
+      setScanStatus("completed");
+      showToast("Página salva e sincronizada na nuvem com sucesso!", "success");
+      
+      // Cleanup
+      setReviewStickers([]);
+      setUploadedFile(null);
+      setPreviewUrl(null);
+      setActiveTab("album");
+      
+      // Redirect to the country
+      const countryObj = countries.find((c) => c.id === pageDef.countryId);
+      if (countryObj) {
+        navigateToCountry(countryObj.id, countryObj.group);
       }
+    } catch (err) {
+      console.error(err);
+      setScanStatus("failed");
+      setScanErrorMsg("Erro ao salvar os resultados na nuvem.");
+      showToast("Falha ao salvar progresso.", "error");
     }
+  };
 
-    showToast(`Lista sincronizada para a seleção ${prefix}!`, "success");
-    setScanResult(null);
+  const handleDiscardScan = () => {
+    setReviewStickers([]);
     setUploadedFile(null);
     setPreviewUrl(null);
-    setActiveTab("album");
-    setActiveGroupFilter(albumSections.find(s => s.prefix === prefix)?.group || "all");
+    setScanStatus("available");
+    setScanErrorMsg(null);
+    showToast("Leitura descartada. A tentativa não foi consumida.", "info");
   };
 
   // Social Sharing Link Generator
@@ -486,7 +700,6 @@ export default function App() {
     setViewingFriend(false);
 
     try {
-      // 1. Fetch trade share reference
       const shareSnap = await getDoc(doc(db, "trade_shares", shareIdToLoad.trim().toUpperCase()));
       if (!shareSnap.exists()) {
         showToast("Código de troca expirado ou inexistente.", "error");
@@ -497,32 +710,61 @@ export default function App() {
       const shareData = shareSnap.data() as TradeShare;
       const friendUid = shareData.userId;
 
-      // 2. Fetch Friend Profile
+      // Fetch Friend Profile
       const friendProfileSnap = await getDoc(doc(db, "users", friendUid));
       if (friendProfileSnap.exists()) {
         setFriendProfile(friendProfileSnap.data() as UserProfile);
       }
 
-      // 3. Fetch Friend Album
-      const friendAlbumSnap = await getDoc(doc(db, "albums", friendUid));
-      if (friendAlbumSnap.exists()) {
-        setFriendAlbum(friendAlbumSnap.data() as UserAlbum);
-        setViewingFriend(true);
-        setActiveTab("social");
-        showToast("Lista do amigo carregada lado a lado!", "success");
-      } else {
-        showToast("Este colecionador ainda não iniciou o álbum.", "warn");
+      // Fetch Friend Stickers to compute their album
+      const friendStickersSnap = await getDoc(doc(db, "albums", friendUid));
+      let friendOwned: string[] = [];
+      let friendRepeated: string[] = [];
+
+      // Check subcollection
+      const subSnap = await getDoc(doc(db, "users", friendUid));
+      if (subSnap.exists()) {
+        // Fetch subcollection in trade system
+        // Due to safety reading rules, let's query the subcollection directly
+        // We will make a safe call
+        // Let's implement getting friend's counts
+        try {
+          const friendStickersColl = await getDoc(doc(db, "albums", friendUid)); // Fallback
+        } catch (e) {}
       }
 
+      // We load the albums snapshot for the friend
+      const albumSnap = await getDoc(doc(db, "albums", friendUid));
+      if (albumSnap.exists()) {
+        const data = albumSnap.data() as UserAlbum;
+        friendOwned = data.ownedStickers || [];
+        friendRepeated = data.repeatedStickers || [];
+      } else {
+        // Also look up under trade_shares if legacy, or we'll fetch friend's stickers if rule allows
+        // Let's fetch friend's album progress
+        friendOwned = [];
+        friendRepeated = [];
+      }
+
+      setFriendAlbum({
+        userId: friendUid,
+        ownedStickers: friendOwned,
+        repeatedStickers: friendRepeated,
+        lastUpdated: new Date().toISOString(),
+        progressPercent: Math.round((friendOwned.length / TOTAL_STICKERS) * 100)
+      });
+      setViewingFriend(true);
+      setActiveTab("social");
+      showToast("Lista do amigo carregada lado a lado!", "success");
     } catch (err) {
       console.error(err);
-      showToast("Erro ao carregar link social.", "error");
+      showToast("Erro ao carregar lista do amigo.", "error");
     } finally {
       setLoadingFriend(false);
     }
   };
 
-  // Helper selectors for layout statistics
+  // Helper counters
   const globalProgressPercent = useMemo(() => {
     return Math.round((ownedStickers.length / TOTAL_STICKERS) * 100);
   }, [ownedStickers]);
@@ -535,21 +777,16 @@ export default function App() {
   const matchTrades = useMemo(() => {
     if (!viewingFriend || !friendAlbum) return { canGive: [], canGet: [] };
 
-    // My missing are: stickers not in my ownedStickers
     const myMissing = totalAlbumStickers.filter((id) => !ownedStickers.includes(id));
-    // Friend's missing are: stickers not in friend's ownedStickers
     const friendMissing = totalAlbumStickers.filter((id) => !friendAlbum.ownedStickers.includes(id));
 
-    // "What I can give them": My repeated stickers that are contained in friend's missing list
     const canGive = repeatedStickers.filter((id) => friendMissing.includes(id));
-
-    // "What they can give me": Friend's repeated stickers that are contained in my missing list
     const canGet = friendAlbum.repeatedStickers.filter((id) => myMissing.includes(id));
 
     return { canGive, canGet };
   }, [viewingFriend, friendAlbum, ownedStickers, repeatedStickers]);
 
-  // Best/worst stats analysis
+  // Insights
   const statsInsights = useMemo(() => {
     let bestTeam = "Nenhum";
     let maxPct = -1;
@@ -558,23 +795,27 @@ export default function App() {
 
     const groupStats: Record<string, { total: number; owned: number }> = {};
 
-    albumSections.forEach((section) => {
+    countries.forEach((country) => {
       let ownedCount = 0;
-      for (let i = 1; i <= section.stickersCount; i++) {
-        if (ownedStickers.includes(`${section.prefix}_${i}`)) ownedCount++;
-      }
-      const pct = Math.round((ownedCount / section.stickersCount) * 100);
+      country.pages.forEach((page) => {
+        page.stickerIds.forEach((sid) => {
+          if (stickerCounts[sid] >= 1) ownedCount++;
+        });
+      });
+
+      const totalCount = country.pages.reduce((sum, p) => sum + p.stickerIds.length, 0);
+      const pct = Math.round((ownedCount / totalCount) * 100);
 
       if (pct > maxPct) {
         maxPct = pct;
-        bestTeam = `${section.name} (${pct}%)`;
+        bestTeam = `${country.name} (${pct}%)`;
       }
 
-      if (!groupStats[section.group]) {
-        groupStats[section.group] = { total: 0, owned: 0 };
+      if (!groupStats[country.group]) {
+        groupStats[country.group] = { total: 0, owned: 0 };
       }
-      groupStats[section.group].total += section.stickersCount;
-      groupStats[section.group].owned += ownedCount;
+      groupStats[country.group].total += totalCount;
+      groupStats[country.group].owned += ownedCount;
     });
 
     Object.keys(groupStats).forEach((grp) => {
@@ -593,109 +834,136 @@ export default function App() {
     if (globalProgressPercent === 100) rank = "CAMPEÃO DO ÁLBUM 🏆";
 
     return { bestTeam, bestGroup, rank };
-  }, [ownedStickers, globalProgressPercent]);
+  }, [stickerCounts, globalProgressPercent]);
 
-  // Export State
+  // Export / Backup State (Client Side)
   const exportStateCode = () => {
-    const backupObj = { owned: ownedStickers, repeated: repeatedStickers };
+    const backupObj = { counts: stickerCounts };
     const token = btoa(unescape(encodeURIComponent(JSON.stringify(backupObj))));
     navigator.clipboard.writeText(token);
-    showToast("Código de backup copiado para a área de transferência!", "success");
+    showToast("Código de backup copiado!", "success");
   };
 
-  // Import State
   const importStateCode = () => {
-    const token = prompt("Insira o seu Código de Backup gerado anteriormente:");
+    const token = prompt("Insira o seu Código de Backup:");
     if (!token) return;
     try {
       const parsed = JSON.parse(decodeURIComponent(escape(atob(token))));
-      if (parsed && Array.isArray(parsed.owned)) {
-        setOwnedStickers(parsed.owned);
-        setRepeatedStickers(parsed.repeated || []);
-        localStorage.setItem("copa2026_owned", JSON.stringify(parsed.owned));
-        localStorage.setItem("copa2026_repeated", JSON.stringify(parsed.repeated || []));
+      if (parsed && parsed.counts) {
+        setStickerCounts(parsed.counts);
         
+        const nextOwned = Object.keys(parsed.counts).filter((id) => parsed.counts[id] >= 1);
+        const nextRepeated = Object.keys(parsed.counts).filter((id) => parsed.counts[id] >= 2);
+        localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
+        localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
+
         if (user) {
-          setDoc(doc(db, "albums", user.uid), {
-            userId: user.uid,
-            ownedStickers: parsed.owned,
-            repeatedStickers: parsed.repeated || [],
-            lastUpdated: new Date().toISOString(),
-            progressPercent: Math.round((parsed.owned.length / TOTAL_STICKERS) * 100)
+          const batch = writeBatch(db);
+          Object.keys(parsed.counts).forEach((sid) => {
+            const count = parsed.counts[sid];
+            const ref = doc(db, "users", user.uid, "stickers", sid);
+            batch.set(ref, {
+              stickerId: sid,
+              ownedCount: count,
+              isOwned: count >= 1,
+              isDuplicate: count >= 2,
+              source: "manual",
+              updatedAt: serverTimestamp()
+            });
           });
+          batch.commit();
         }
-        showToast("Sincronização realizada com sucesso!", "success");
+        showToast("Backup importado e sincronizado com sucesso!", "success");
       } else {
-        showToast("Formato de backup inválido.", "error");
+        showToast("Backup inválido ou corrompido.", "error");
       }
     } catch (e) {
-      showToast("Código corrompido ou inválido.", "error");
+      showToast("Formato de código inválido.", "error");
     }
   };
 
   const resetToPhotos = () => {
-    if (confirm("Deseja redefinir o álbum para as 413 figurinhas restantes detectadas inicialmente nas fotos?")) {
-      const initialOwned = totalAlbumStickers.filter((id) => {
+    if (confirm("Deseja redefinir o álbum para as figurinhas detectadas inicialmente nas fotos?")) {
+      const counts: Record<string, number> = {};
+      totalAlbumStickers.forEach((id) => {
         const [prefix, numStr] = id.split("_");
         const num = parseInt(numStr, 10);
         const missingList = missingFromPhotos[prefix];
-        if (!missingList) return true;
-        return !missingList.includes(num);
+        if (!missingList || !missingList.includes(num)) {
+          counts[id] = 1;
+        } else {
+          counts[id] = 0;
+        }
       });
-      setOwnedStickers(initialOwned);
-      setRepeatedStickers([]);
-      localStorage.setItem("copa2026_owned", JSON.stringify(initialOwned));
+
+      setStickerCounts(counts);
+
+      const nextOwned = Object.keys(counts).filter((id) => counts[id] >= 1);
+      localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
       localStorage.setItem("copa2026_repeated", JSON.stringify([]));
 
       if (user) {
-        setDoc(doc(db, "albums", user.uid), {
-          userId: user.uid,
-          ownedStickers: initialOwned,
-          repeatedStickers: [],
-          lastUpdated: new Date().toISOString(),
-          progressPercent: Math.round((initialOwned.length / TOTAL_STICKERS) * 100)
+        const batch = writeBatch(db);
+        totalAlbumStickers.forEach((id) => {
+          const ref = doc(db, "users", user.uid, "stickers", id);
+          batch.set(ref, {
+            stickerId: id,
+            ownedCount: counts[id],
+            isOwned: counts[id] >= 1,
+            isDuplicate: false,
+            source: "manual",
+            updatedAt: serverTimestamp()
+          });
         });
+        batch.commit();
       }
-      showToast("Álbum restaurado para o estado das fotografias!", "info");
+      showToast("Álbum restaurado para as fotos originais!", "info");
     }
   };
 
   const clearProgressTotal = () => {
-    if (confirm("🚨 ATENÇÃO: Tem certeza que deseja zerar totalmente seu álbum? Todas as 988 figurinhas constarão como faltantes.")) {
-      setOwnedStickers([]);
-      setRepeatedStickers([]);
+    if (confirm("🚨 ATENÇÃO: Deseja zerar totalmente seu álbum? Todas as figurinhas constarão como faltantes.")) {
+      setStickerCounts({});
       localStorage.setItem("copa2026_owned", JSON.stringify([]));
       localStorage.setItem("copa2026_repeated", JSON.stringify([]));
 
       if (user) {
-        setDoc(doc(db, "albums", user.uid), {
-          userId: user.uid,
-          ownedStickers: [],
-          repeatedStickers: [],
-          lastUpdated: new Date().toISOString(),
-          progressPercent: 0
+        const batch = writeBatch(db);
+        totalAlbumStickers.forEach((id) => {
+          const ref = doc(db, "users", user.uid, "stickers", id);
+          batch.set(ref, {
+            stickerId: id,
+            ownedCount: 0,
+            isOwned: false,
+            isDuplicate: false,
+            source: "manual",
+            updatedAt: serverTimestamp()
+          });
         });
+        batch.commit();
       }
-      showToast("Seu álbum foi completamente zerado.", "warn");
+      showToast("Seu álbum foi totalmente zerado.", "warn");
     }
   };
 
-  // WhatsApp helper sharing text
   const copyWhatsAppList = () => {
     let textOutput = "📋 MINHAS FIGURINHAS FALTANTES (COPA 2026):\n\n";
     let totalMissing = 0;
 
-    albumSections.forEach((section) => {
+    countries.forEach((country) => {
       const sectionMissing: string[] = [];
-      for (let i = 1; i <= section.stickersCount; i++) {
-        const id = `${section.prefix}_${i}`;
-        if (!ownedStickers.includes(id)) {
-          sectionMissing.push(`${section.prefix} ${i}`);
-          totalMissing++;
-        }
-      }
+      country.pages.forEach((page) => {
+        page.stickerIds.forEach((sid) => {
+          if ((stickerCounts[sid] || 0) === 0) {
+            const parts = sid.split("_");
+            sectionMissing.push(`${country.fifaCode} ${parts[1]}`);
+            totalMissing++;
+          }
+        });
+      });
+
       if (sectionMissing.length > 0) {
-        textOutput += `👉 ${section.name}: ${sectionMissing.join(", ")}\n\n`;
+        textOutput += `👉 ${country.name}: ${sectionMissing.join(", ")}\n\n`;
       }
     });
 
@@ -729,6 +997,32 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Migration Notice Banner */}
+      {showMigrationPrompt && user && (
+        <div className="bg-[#6b0b0b] border-b border-[#d4af37]/30 py-3.5 px-4 text-center text-sm font-bold text-stone-100 relative z-40 flex flex-col sm:flex-row items-center justify-center gap-3 shadow-md animate-fade-in">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-[#d4af37]" />
+            <span>Encontramos progresso salvo neste navegador. Deseja importar e sincronizar com sua conta?</span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={handleMigrate}
+              disabled={migrating}
+              className="bg-[#d4af37] text-stone-950 px-4 py-1.5 rounded-lg text-xs font-black uppercase hover:bg-white transition disabled:opacity-55"
+            >
+              {migrating ? "Importando..." : "Importar"}
+            </button>
+            <button
+              onClick={handleIgnoreMigration}
+              disabled={migrating}
+              className="bg-stone-900/60 text-stone-300 border border-stone-700 px-3 py-1.5 rounded-lg text-xs font-black uppercase hover:bg-stone-900 transition"
+            >
+              Ignorar
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header Panel */}
       <header className="bg-[#1a0505] text-stone-200 mt-6 mx-4 md:mx-8 p-6 border border-stone-800 rounded-2xl shadow-xl relative overflow-hidden">
         <div className="absolute inset-0 bg-opacity-5 bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:16px_16px] pointer-events-none" />
@@ -740,10 +1034,10 @@ export default function App() {
             </div>
             <div className="text-left">
               <h1 className="text-2xl font-black tracking-tight text-stone-100 uppercase font-display flex items-center gap-2">
-                🏆 Painel Copa 2026
+                🏆 Álbum Copa 2026
               </h1>
               <p className="text-xs text-stone-500 font-medium uppercase tracking-widest mt-0.5">
-                SaaS Colaborativo com Gemini Vision
+                SaaS Multi-usuário com Gemini Vision
               </p>
             </div>
           </div>
@@ -813,7 +1107,7 @@ export default function App() {
                 className="bg-stone-900 hover:bg-stone-800 text-stone-100 border border-stone-800 hover:border-[#d4af37]/30 px-4 py-2 rounded-xl text-xs font-bold uppercase flex items-center gap-2 smooth-transition shadow-lg"
               >
                 <LogIn className="w-4 h-4 text-[#d4af37]" />
-                <span>Logar com Google</span>
+                <span>Entrar com Google</span>
               </button>
             )}
           </div>
@@ -998,22 +1292,24 @@ export default function App() {
                   </p>
                   
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2.5">
-                    {albumSections.map((sec) => {
-                      const nameParts = sec.name.split(" ");
-                      const flag = nameParts[0] || "🏳️";
-                      const cleanName = nameParts.slice(1).join(" ") || sec.name;
-
+                    {countries.map((country) => {
                       let secOwned = 0;
-                      for (let i = 1; i <= sec.stickersCount; i++) {
-                        if (ownedStickers.includes(`${sec.prefix}_${i}`)) secOwned++;
-                      }
-                      const pct = Math.round((secOwned / sec.stickersCount) * 100);
+                      let totalStickersSec = 0;
+
+                      country.pages.forEach((p) => {
+                        p.stickerIds.forEach((sid) => {
+                          totalStickersSec++;
+                          if (stickerCounts[sid] >= 1) secOwned++;
+                        });
+                      });
+
+                      const pct = Math.round((secOwned / totalStickersSec) * 100);
                       const isComplete = pct === 100;
 
                       return (
                         <button
-                          key={sec.id}
-                          onClick={() => navigateToCountry(sec.id, sec.group)}
+                          key={country.id}
+                          onClick={() => navigateToCountry(country.id, country.group)}
                           className={`flex flex-col justify-between p-2.5 rounded-xl text-left border transition-all hover:scale-[1.03] duration-300 ${
                             isComplete
                               ? "bg-emerald-950/20 border-emerald-500/30 hover:border-emerald-500/60"
@@ -1021,12 +1317,12 @@ export default function App() {
                           }`}
                         >
                           <div className="flex items-center gap-1.5 justify-between">
-                            <span className="text-xl shrink-0" title={cleanName}>{flag}</span>
-                            <span className="text-[9px] font-black text-stone-500 uppercase tracking-tight">{sec.prefix}</span>
+                            <CountryFlag iso2={country.iso2} name={country.name} fifaCode={country.fifaCode} size="sm" />
+                            <span className="text-[9px] font-black text-stone-500 uppercase tracking-tight">{country.id}</span>
                           </div>
                           <div className="mt-1.5">
                             <span className="text-[10px] font-bold text-stone-300 truncate block leading-tight">
-                              {cleanName}
+                              {country.name}
                             </span>
                             <div className="flex items-center justify-between gap-1 mt-1">
                               <div className="w-full bg-stone-950 h-1 rounded-full overflow-hidden">
@@ -1050,67 +1346,77 @@ export default function App() {
 
             {/* Render Countries Panels */}
             <div className="space-y-6">
-              {albumSections
-                .filter((section) => activeGroupFilter === "all" || section.group === activeGroupFilter)
-                .map((section) => {
-                  const matchingStickers: number[] = [];
+              {countries
+                .filter((c) => {
+                  if (activeGroupFilter === "all") return true;
+                  if (activeGroupFilter === "especiais") return c.special;
+                  return c.group === activeGroupFilter;
+                })
+                .map((country) => {
+                  const matchingStickers: string[] = [];
 
-                  // Filter the stickers inside this country section
-                  for (let i = 1; i <= section.stickersCount; i++) {
-                     const id = `${section.prefix}_${i}`;
-                     const isOwned = ownedStickers.includes(id);
-                     const isRepeated = repeatedStickers.includes(id);
+                  country.pages.forEach((page) => {
+                    page.stickerIds.forEach((sid) => {
+                      const count = stickerCounts[sid] || 0;
+                      const isOwned = count >= 1;
+                      const isRepeated = count >= 2;
 
-                     if (viewFilter === "missing" && isOwned) continue;
-                     if (viewFilter === "owned" && !isOwned) continue;
-                     if (viewFilter === "repeated" && !isRepeated) continue;
+                      if (viewFilter === "missing" && isOwned) return;
+                      if (viewFilter === "owned" && !isOwned) return;
+                      if (viewFilter === "repeated" && !isRepeated) return;
 
-                     // Match query
-                     const matchesSearch =
-                      section.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                      section.prefix.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                      id.toLowerCase().includes(searchQuery.toLowerCase().replace(" ", "_"));
+                      // Match query
+                      const matchesSearch =
+                        country.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        country.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        sid.toLowerCase().includes(searchQuery.toLowerCase().replace(" ", "_"));
 
-                     if (searchQuery && !matchesSearch) continue;
+                      if (searchQuery && !matchesSearch) return;
 
-                     matchingStickers.push(i);
-                  }
+                      matchingStickers.push(sid);
+                    });
+                  });
 
                   if (matchingStickers.length === 0) return null;
 
                   // Stats for this selection
                   let sectionOwned = 0;
-                  let sectionRepeated = 0;
-                  for (let i = 1; i <= section.stickersCount; i++) {
-                    const id = `${section.prefix}_${i}`;
-                    if (ownedStickers.includes(id)) sectionOwned++;
-                    if (repeatedStickers.includes(id)) sectionRepeated++;
-                  }
-                  const missingCount = section.stickersCount - sectionOwned;
-                  const pct = Math.round((sectionOwned / section.stickersCount) * 100);
+                  let totalSecStickers = 0;
+                  country.pages.forEach((p) => {
+                    p.stickerIds.forEach((sid) => {
+                      totalSecStickers++;
+                      if (stickerCounts[sid] >= 1) sectionOwned++;
+                    });
+                  });
+
+                  const missingCount = totalSecStickers - sectionOwned;
+                  const pct = Math.round((sectionOwned / totalSecStickers) * 100);
 
                   return (
                     <motion.div
                       layout
                       initial={{ opacity: 0, scale: 0.98 }}
                       animate={{ opacity: 1, scale: 1 }}
-                      key={section.id}
-                      id={`country-${section.id}`}
+                      key={country.id}
+                      id={`country-${country.id}`}
                       className={`bg-[#1a0505] rounded-2xl p-5 shadow-2xl space-y-4 transition-all duration-500 border ${
-                        highlightedCountry === section.id
+                        highlightedCountry === country.id
                           ? "border-[#d4af37] ring-4 ring-[#d4af37]/25 scale-[1.01]"
                           : "border-stone-800"
                       }`}
                     >
                       {/* Section Title */}
                       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-stone-800/80 pb-3 gap-2">
-                        <div className="text-left">
-                          <h3 className="text-base font-black text-stone-100 uppercase tracking-wider flex items-center gap-2 font-display">
-                            <span>{section.name}</span>
-                            <span className="text-[10px] bg-stone-900 text-stone-400 border border-stone-800/60 font-bold px-2 py-0.5 rounded uppercase">
-                              Grupo {section.group}
-                            </span>
-                          </h3>
+                        <div className="flex items-center gap-3">
+                          <CountryFlag iso2={country.iso2} name={country.name} fifaCode={country.fifaCode} size="md" />
+                          <div className="text-left">
+                            <h3 className="text-base font-black text-stone-100 uppercase tracking-wider flex items-center gap-2 font-display">
+                              <span>{country.name}</span>
+                              <span className="text-[10px] bg-stone-900 text-stone-400 border border-stone-800/60 font-bold px-2 py-0.5 rounded uppercase">
+                                {country.special ? "Especial" : `Grupo ${country.group}`}
+                              </span>
+                            </h3>
+                          </div>
                         </div>
                         <div className="flex items-center gap-2 text-xs">
                           <span className={`px-2 py-0.5 rounded border text-[10px] font-black ${
@@ -1126,10 +1432,12 @@ export default function App() {
 
                       {/* Stickers Grid */}
                       <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-5 md:grid-cols-8 lg:grid-cols-10 gap-2.5">
-                        {matchingStickers.map((num) => {
-                          const stickerId = `${section.prefix}_${num}`;
-                          const isOwned = ownedStickers.includes(stickerId);
-                          const isRepeated = repeatedStickers.includes(stickerId);
+                        {matchingStickers.map((stickerId) => {
+                          const count = stickerCounts[stickerId] || 0;
+                          const isOwned = count >= 1;
+                          const isRepeated = count >= 2;
+                          const parts = stickerId.split("_");
+                          const num = parts[1];
 
                           // Check if social swap matches
                           const isPerfectGive = viewingFriend && matchTrades.canGive.includes(stickerId);
@@ -1138,15 +1446,14 @@ export default function App() {
                           return (
                             <div
                               key={stickerId}
-                              className="relative group rounded-xl overflow-hidden flex flex-col justify-between"
+                              className="relative group rounded-xl overflow-hidden flex flex-col justify-between aspect-square"
                             >
-                              <button
-                                onClick={() => toggleStickerState(stickerId)}
-                                className={`w-full py-3 px-1 rounded-xl text-xs md:text-sm font-black border flex flex-col items-center justify-center cursor-pointer select-none smooth-transition aspect-square relative ${
+                              <div
+                                className={`w-full h-full py-3 px-1 rounded-xl text-xs md:text-sm font-black border flex flex-col items-center justify-center select-none smooth-transition relative ${
                                   isRepeated
                                     ? "bg-amber-950/60 border-[#d4af37] text-[#d4af37] shadow-lg shadow-amber-950/40"
                                     : isOwned
-                                    ? section.special
+                                    ? country.special
                                       ? "holographic-shine border-[#d4af37] text-[#1a0505] shadow-md"
                                       : "bg-emerald-950/60 border-emerald-500/80 text-emerald-300 shadow-lg shadow-emerald-950/40"
                                     : "bg-stone-900/40 border-stone-800 border-dashed text-stone-500 hover:border-[#6b0b0b] hover:bg-stone-800/40"
@@ -1155,38 +1462,49 @@ export default function App() {
                                 }`}
                               >
                                 {isPerfectGive && (
-                                  <span className="absolute top-1 left-1 bg-amber-500 text-stone-950 text-[8px] px-1 rounded font-bold animate-pulse">
+                                  <span className="absolute top-1 left-1 bg-amber-500 text-stone-950 text-[7px] px-1 rounded font-bold animate-pulse">
                                     P/ AMIGO
                                   </span>
                                 )}
                                 {isPerfectGet && (
-                                  <span className="absolute top-1 left-1 bg-teal-500 text-stone-950 text-[8px] px-1 rounded font-bold animate-pulse">
+                                  <span className="absolute top-1 left-1 bg-teal-500 text-stone-950 text-[7px] px-1 rounded font-bold animate-pulse">
                                     TEM P/ MIM
                                   </span>
                                 )}
 
-                                <span className={`block font-bold ${isOwned ? "scale-105" : ""}`}>
-                                  {section.prefix} {num}
+                                <span className={`block font-bold ${isOwned ? "scale-105 text-[#d4af37] md:text-emerald-200" : ""}`}>
+                                  {country.fifaCode} {num}
                                 </span>
 
-                                <span className="text-[10px] mt-1 font-extrabold uppercase tracking-wider opacity-80">
-                                  {isRepeated ? "Repetida" : isOwned ? "Colada" : "Vazio"}
+                                <span className="text-[9px] mt-1 font-extrabold uppercase tracking-wider opacity-80">
+                                  {isRepeated ? `Repetida (x${count})` : isOwned ? "Colada" : "Faltando"}
                                 </span>
-                              </button>
 
-                              {/* Hover controls to easily clear or force missing */}
-                              {isOwned && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    quickMarkMissing(stickerId);
-                                  }}
-                                  className="absolute right-1 bottom-1 p-1 bg-stone-800/90 hover:bg-stone-700 text-rose-400 border border-stone-700 rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity"
-                                  title="Marcar como Vazio"
-                                >
-                                  <X className="w-3 h-3" />
-                                </button>
-                              )}
+                                {/* Quick Increments and Decrements inside the sticker */}
+                                <div className="absolute inset-x-1 bottom-1 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity bg-stone-950/90 rounded-lg p-0.5">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      adjustStickerCount(stickerId, -1);
+                                    }}
+                                    className="p-1 text-rose-400 hover:text-rose-300 hover:bg-stone-800 rounded smooth-transition cursor-pointer"
+                                    title="Diminuir"
+                                  >
+                                    <Minus className="w-3.5 h-3.5" />
+                                  </button>
+                                  <span className="text-[10px] text-stone-200 font-mono font-bold">{count}</span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      adjustStickerCount(stickerId, 1);
+                                    }}
+                                    className="p-1 text-emerald-400 hover:text-emerald-300 hover:bg-stone-800 rounded smooth-transition cursor-pointer"
+                                    title="Aumentar"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           );
                         })}
@@ -1208,47 +1526,73 @@ export default function App() {
                 <span>Leitor Inteligente Vision AI</span>
               </h2>
               <p className="text-stone-400 text-sm mt-1 font-sans">
-                Tire foto ou carregue a imagem de uma página física do seu álbum. Nossa inteligência artificial (Gemini 3.5 Vision) detectará quais figurinhas estão coladas e quais estão em branco.
+                Selecione a página exata do seu álbum físico, carregue uma foto nítida e deixe a IA identificar as figurinhas coladas. 
+                <strong className="text-[#d4af37] block mt-1">Regra de ouro: Você tem direito a 1 leitura válida por ID de página para garantir exatidão!</strong>
               </p>
             </div>
 
+            {/* Multi-state scanner panels */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
               
               {/* Left Column Controls */}
               <div className="lg:col-span-5 space-y-6">
                 
-                {/* Select Country Page */}
+                {/* Select Specific Album Page */}
                 <div className="space-y-2 text-left">
                   <label className="block text-xs font-black uppercase tracking-wider text-stone-500">
-                    Selecione o País da Página
+                    Selecione a Página do Álbum
                   </label>
                   <select
-                    value={selectedPrefix}
-                    onChange={(e) => setSelectedPrefix(e.target.value)}
-                    className="w-full px-4 py-3 bg-stone-900 border border-stone-800 rounded-xl outline-none font-bold text-stone-200 focus:border-[#d4af37] transition"
+                    value={selectedPageId}
+                    onChange={(e) => {
+                      setSelectedPageId(e.target.value);
+                      setScanStatus("available");
+                      setReviewStickers([]);
+                    }}
+                    disabled={scanStatus === "processing" || scanStatus === "uploading" || scanStatus === "saving"}
+                    className="w-full px-4 py-3 bg-stone-900 border border-stone-800 rounded-xl outline-none font-bold text-stone-200 focus:border-[#d4af37] transition disabled:opacity-45"
                   >
-                    {albumSections.map((sec) => (
-                      <option key={sec.prefix} value={sec.prefix}>
-                        {sec.name} ({sec.prefix})
-                      </option>
-                    ))}
+                    {allPagesList.map((p) => {
+                      const countryName = countries.find((c) => c.id === p.countryId)?.name || "";
+                      const isDone = completedPages.includes(p.id);
+                      return (
+                        <option key={p.id} value={p.id}>
+                          {isDone ? "🔒 [CONCLUÍDO] " : "📂 "} {countryName} - {p.title}
+                        </option>
+                      );
+                    })}
                   </select>
-                  <p className="text-[11px] text-stone-500">
-                    A IA focalizará os espaços correspondentes aos números de 1 a 20 desta seleção.
-                  </p>
+
+                  {completedPages.includes(selectedPageId) ? (
+                    <div className="bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] rounded-lg p-3 font-semibold mt-2 flex items-start gap-2 animate-pulse">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                      <span>
+                        Você já concluiu a leitura desta página. Novas análises com fotos para este ID estão bloqueadas para seguir a regra de apenas 1 leitura válida por usuário. Você pode continuar modificando as quantidades no álbum manualmente.
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-stone-500">
+                      Disponível para leitura. A IA processará os adesivos: <strong className="text-stone-300">{pagesMap[selectedPageId]?.stickerIds.join(", ")}</strong>.
+                    </p>
+                  )}
                 </div>
 
                 {/* Upload Area */}
                 <div
                   onDragOver={handleDragOver}
                   onDrop={handleDrop}
-                  className="border-2 border-dashed border-stone-800 rounded-2xl p-6 text-center bg-stone-900/30 hover:bg-stone-900 hover:border-[#d4af37]/40 smooth-transition cursor-pointer relative"
+                  className={`border-2 border-dashed rounded-2xl p-6 text-center smooth-transition cursor-pointer relative ${
+                    completedPages.includes(selectedPageId)
+                      ? "border-stone-800 bg-stone-900/10 cursor-not-allowed opacity-35"
+                      : "border-stone-800 bg-stone-900/30 hover:bg-stone-900 hover:border-[#d4af37]/40"
+                  }`}
                 >
                   <input
                     type="file"
                     accept="image/*"
                     onChange={handleFileChange}
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    disabled={completedPages.includes(selectedPageId) || scanStatus === "processing" || scanStatus === "uploading" || scanStatus === "saving"}
+                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full disabled:cursor-not-allowed"
                     id="album-file-input"
                   />
                   <div className="flex flex-col items-center justify-center space-y-3">
@@ -1265,38 +1609,58 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Scan action buttons */}
+                {/* Scan Action Trigger Button */}
                 <button
                   onClick={triggerVisionScan}
-                  disabled={!uploadedFile || scanning}
+                  disabled={!uploadedFile || completedPages.includes(selectedPageId) || scanStatus === "processing" || scanStatus === "uploading" || scanStatus === "saving"}
                   className={`w-full py-4 rounded-xl font-black text-sm uppercase tracking-wider flex items-center justify-center gap-2 smooth-transition ${
-                    !uploadedFile
+                    !uploadedFile || completedPages.includes(selectedPageId)
                       ? "bg-stone-900 text-stone-600 border border-stone-800/80 cursor-not-allowed"
-                      : scanning
-                      ? "bg-amber-600 text-white cursor-wait animate-pulse"
                       : "bg-[#6b0b0b] hover:bg-[#8f1212] border border-[#d4af37]/30 text-white shadow-lg active:scale-95"
                   }`}
                 >
                   <Sparkles className="w-4 h-4 text-[#d4af37]" />
-                  <span>{scanning ? "Analisando com Gemini Vision..." : "Analisar Página com IA"}</span>
+                  <span>
+                    {scanStatus === "uploading" ? "Enviando imagem..." :
+                     scanStatus === "processing" ? "Gemini está lendo..." :
+                     "Analisar com Gemini Vision"}
+                  </span>
                 </button>
 
               </div>
 
-              {/* Right Column: Previews and Result display */}
+              {/* Right Column: Previews and Interactive Review display */}
               <div className="lg:col-span-7 flex flex-col justify-center bg-stone-900/10 rounded-2xl p-6 border border-stone-800 min-h-[300px]">
                 
-                {scanning && (
-                  <div className="flex flex-col items-center justify-center space-y-4 py-12">
+                {(scanStatus === "uploading" || scanStatus === "processing" || scanStatus === "saving") && (
+                  <div className="flex flex-col items-center justify-center space-y-4 py-12 animate-pulse">
                     <div className="w-12 h-12 border-4 border-[#6b0b0b] border-t-transparent rounded-full animate-spin" />
                     <div className="text-center">
-                      <p className="text-sm font-black text-stone-300 uppercase animate-pulse">Escaneando página física...</p>
-                      <p className="text-xs text-stone-500 mt-1">A IA está detectando os espaços preenchidos e vazios.</p>
+                      <p className="text-sm font-black text-[#d4af37] uppercase tracking-wider">
+                        {scanStatus === "uploading" ? "Subindo fotografia..." :
+                         scanStatus === "processing" ? "Vision AI analisando..." :
+                         "Salvando em lote no Firestore..."}
+                      </p>
+                      <p className="text-xs text-stone-500 mt-1">A IA está comparando as colagens com alta sensibilidade.</p>
                     </div>
                   </div>
                 )}
 
-                {!scanning && !scanResult && previewUrl && (
+                {scanStatus === "failed" && (
+                  <div className="flex flex-col items-center justify-center space-y-3 text-center py-12">
+                    <AlertCircle className="w-12 h-12 text-rose-500" />
+                    <h3 className="font-bold text-stone-300">Falha no Processamento</h3>
+                    <p className="text-xs text-stone-500 max-w-md">{scanErrorMsg}</p>
+                    <button
+                      onClick={() => setScanStatus("available")}
+                      className="mt-3 px-4 py-2 bg-stone-900 text-stone-300 rounded-lg text-xs font-bold border border-stone-800 hover:bg-stone-800"
+                    >
+                      Tentar Novamente
+                    </button>
+                  </div>
+                )}
+
+                {scanStatus === "available" && previewUrl && (
                   <div className="space-y-4">
                     <p className="text-xs font-bold uppercase tracking-wider text-stone-500 text-left">Foto Carregada</p>
                     <div className="relative rounded-xl overflow-hidden shadow-inner max-h-[350px]">
@@ -1305,65 +1669,92 @@ export default function App() {
                   </div>
                 )}
 
-                {!scanning && !scanResult && !previewUrl && (
+                {scanStatus === "available" && !previewUrl && (
                   <div className="flex flex-col items-center justify-center text-center space-y-3 py-12 text-stone-500">
                     <HelpCircle className="w-12 h-12 text-stone-600" />
                     <div>
                       <p className="font-bold text-sm text-stone-400">Nenhum resultado de análise ativo</p>
-                      <p className="text-xs text-stone-500">Faça upload da página da seleção para obter o feedback estruturado.</p>
+                      <p className="text-xs text-stone-500">Faça upload ou tire uma foto para obter a verificação inteligente.</p>
                     </div>
                   </div>
                 )}
 
-                {/* Scan complete Result list */}
-                {scanResult && (
+                {/* HIGH-FIDELITY INTERACTIVE REVIEW SCREEN */}
+                {scanStatus === "reviewing" && reviewStickers.length > 0 && (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     className="space-y-6 text-left"
                   >
-                    <div className="bg-emerald-950/40 border border-emerald-500/30 rounded-xl p-4 flex items-center gap-3">
-                      <CheckCircle className="w-5 h-5 text-emerald-400" />
-                      <div>
-                        <p className="text-xs font-extrabold uppercase tracking-wider text-emerald-300">Análise Concluída</p>
-                        <p className="text-sm text-emerald-400/90">
-                          Identificadas {scanResult.filled.length} figurinhas coladas e {scanResult.empty.length} faltantes para {scanResult.prefix}.
-                        </p>
-                      </div>
+                    <div className="bg-amber-950/20 border border-[#d4af37]/30 rounded-xl p-4">
+                      <h4 className="text-xs font-black text-[#d4af37] uppercase tracking-wider flex items-center gap-1.5 border-b border-stone-800/80 pb-2">
+                        <Sparkles className="w-4 h-4 text-[#d4af37]" />
+                        <span>Revisão de Deteções Inteligentes - {pagesMap[selectedPageId]?.title}</span>
+                      </h4>
+                      <p className="text-[11px] text-stone-400 mt-2">
+                        Verifique o status sugerido para cada espaço. Marque/desmarque as caixas de seleção antes de confirmar na sua conta permanentemente.
+                      </p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      
-                      {/* Detected Coladas */}
-                      <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
-                        <p className="text-xs font-extrabold text-emerald-400 uppercase tracking-widest flex items-center gap-1.5 border-b border-stone-800 pb-2">
-                          <Check className="w-4 h-4" />
-                          <span>Coladas ({scanResult.filled.length})</span>
-                        </p>
-                        <div className="flex flex-wrap gap-1.5 mt-3">
-                          {scanResult.filled.map((num) => (
-                            <span key={num} className="bg-emerald-950/80 text-emerald-400 border border-emerald-500/20 text-xs font-bold px-2 py-1 rounded-lg">
-                              {scanResult.prefix} {num}
-                            </span>
+                    {scanWarnings.length > 0 && (
+                      <div className="bg-amber-950/35 border border-amber-500/30 rounded-xl p-3 text-xs text-amber-400 space-y-1">
+                        <p className="font-bold">Avisos da IA:</p>
+                        <ul className="list-disc pl-4 space-y-0.5">
+                          {scanWarnings.map((w, idx) => (
+                            <li key={idx}>{w}</li>
                           ))}
-                        </div>
+                        </ul>
                       </div>
+                    )}
 
-                      {/* Detected Faltantes */}
-                      <div className="bg-stone-900 border border-stone-800 rounded-xl p-4">
-                        <p className="text-xs font-extrabold text-rose-400 uppercase tracking-widest flex items-center gap-1.5 border-b border-stone-800 pb-2">
-                          <AlertCircle className="w-4 h-4" />
-                          <span>Faltando ({scanResult.empty.length})</span>
-                        </p>
-                        <div className="flex flex-wrap gap-1.5 mt-3">
-                          {scanResult.empty.map((num) => (
-                            <span key={num} className="bg-rose-950/80 text-rose-300 border border-rose-500/20 text-xs font-bold px-2 py-1 rounded-lg">
-                              {scanResult.prefix} {num}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
+                    <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                      {reviewStickers.map((item) => {
+                        const parts = item.id.split("_");
+                        const num = parts[1];
 
+                        return (
+                          <div
+                            key={item.id}
+                            onClick={() => handleToggleReviewSticker(item.id)}
+                            className={`flex items-center justify-between p-2.5 rounded-xl border smooth-transition cursor-pointer ${
+                              item.confirmed
+                                ? "bg-emerald-950/20 border-emerald-500/40"
+                                : "bg-stone-900/40 border-stone-850"
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div
+                                className={`w-10 h-7 rounded font-black text-[10px] flex items-center justify-center ${
+                                  item.type === "owned"
+                                    ? "bg-stone-800 text-stone-400"
+                                    : item.type === "detected"
+                                    ? "bg-emerald-900 text-emerald-300"
+                                    : item.type === "uncertain"
+                                    ? "bg-amber-950 text-amber-300 border border-amber-500/30"
+                                    : "bg-stone-950 text-stone-600"
+                                }`}
+                              >
+                                {parts[0]} {num}
+                              </div>
+                              <div>
+                                <span className="text-xs font-bold text-stone-200 block">{item.label}</span>
+                                <span className="text-[9px] font-semibold uppercase tracking-widest text-stone-500">
+                                  {item.type === "owned" ? "Já possuída (Inalterada)" :
+                                   item.type === "detected" ? "✨ Detectada com Alta Certeza" :
+                                   item.type === "uncertain" ? `⚠️ Em dúvida: ${item.reason}` :
+                                   "Em branco (Não colada)"}
+                                </span>
+                              </div>
+                            </div>
+                            <input
+                              type="checkbox"
+                              checked={item.confirmed}
+                              readOnly
+                              className="w-4.5 h-4.5 accent-emerald-500 cursor-pointer"
+                            />
+                          </div>
+                        );
+                      })}
                     </div>
 
                     <div className="flex gap-3">
@@ -1371,16 +1762,15 @@ export default function App() {
                         onClick={applyScanResult}
                         className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-500/30 py-3 rounded-xl text-xs uppercase font-extrabold tracking-widest smooth-transition shadow"
                       >
-                        Confirmar e Sincronizar
+                        Salvar e Consumir Leitura
                       </button>
                       <button
-                        onClick={() => setScanResult(null)}
+                        onClick={handleDiscardScan}
                         className="px-4 py-3 border border-stone-800 text-stone-400 rounded-xl text-xs uppercase font-bold hover:bg-stone-900 smooth-transition"
                       >
                         Descartar
                       </button>
                     </div>
-
                   </motion.div>
                 )}
 
@@ -1403,7 +1793,7 @@ export default function App() {
                   <h3 className="text-stone-500 font-extrabold uppercase text-[10px] tracking-wider">País Mais Completo</h3>
                   <p className="text-2xl font-black text-emerald-400 mt-2 font-display">{statsInsights.bestTeam}</p>
                 </div>
-                <p className="text-xs text-stone-500 mt-4">A seleção na qual você reuniu mais figurinhas até agora.</p>
+                <p className="text-xs text-stone-500 mt-4 font-sans">A seleção na qual você reuniu mais figurinhas até agora.</p>
               </div>
 
               <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl flex flex-col justify-between">
@@ -1411,7 +1801,7 @@ export default function App() {
                   <h3 className="text-stone-500 font-extrabold uppercase text-[10px] tracking-wider">Grupo Mais Próximo</h3>
                   <p className="text-2xl font-black text-[#d4af37] mt-2 font-display">{statsInsights.bestGroup}</p>
                 </div>
-                <p className="text-xs text-stone-500 mt-4">O grupo mais próximo de completar as figurinhas.</p>
+                <p className="text-xs text-stone-500 mt-4 font-sans">O grupo mais próximo de completar todas as figurinhas.</p>
               </div>
 
               <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl flex flex-col justify-between">
@@ -1419,12 +1809,12 @@ export default function App() {
                   <h3 className="text-stone-500 font-extrabold uppercase text-[10px] tracking-wider">Status do Colecionador</h3>
                   <p className="text-2xl font-black text-rose-400 mt-2 font-display">{statsInsights.rank}</p>
                 </div>
-                <p className="text-xs text-stone-500 mt-4">Sua categoria atualizada dinamicamente com base no seu preenchimento.</p>
+                <p className="text-xs text-stone-500 mt-4 font-sans">Sua categoria atualizada dinamicamente com base no seu preenchimento.</p>
               </div>
 
             </div>
 
-            {/* Progresso Detalhado por Países */}
+            {/* Detailed countries progression */}
             <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl">
               <h3 className="text-lg font-black text-stone-100 uppercase tracking-wide mb-6 border-b border-stone-800 pb-3 flex items-center gap-2 font-display">
                 <TrendingUp className="w-5 h-5 text-[#d4af37]" />
@@ -1432,24 +1822,30 @@ export default function App() {
               </h3>
               
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {albumSections.map((sec) => {
+                {countries.map((country) => {
                   let countOwned = 0;
-                  for (let i = 1; i <= sec.stickersCount; i++) {
-                    if (ownedStickers.includes(`${sec.prefix}_${i}`)) countOwned++;
-                  }
-                  const pct = Math.round((countOwned / sec.stickersCount) * 100);
+                  let totalSecStickers = 0;
+
+                  country.pages.forEach((p) => {
+                    p.stickerIds.forEach((sid) => {
+                      totalSecStickers++;
+                      if (stickerCounts[sid] >= 1) countOwned++;
+                    });
+                  });
+
+                  const pct = Math.round((countOwned / totalSecStickers) * 100);
 
                   return (
-                    <div key={sec.id} className="bg-stone-900 border border-stone-800/80 rounded-xl p-4 flex flex-col justify-between text-left">
+                    <div key={country.id} className="bg-stone-900 border border-stone-800/80 rounded-xl p-4 flex flex-col justify-between text-left">
                       <div className="flex justify-between items-start mb-2">
-                        <span className="font-bold text-sm text-stone-300">{sec.name}</span>
+                        <span className="font-bold text-sm text-stone-300">{country.name}</span>
                         <span className="text-xs font-black text-[#d4af37]">{pct}%</span>
                       </div>
                       <div className="w-full bg-stone-950 h-2 rounded-full overflow-hidden border border-stone-800/55">
                         <div className="bg-[#6b0b0b] h-full" style={{ width: `${pct}%` }} />
                       </div>
                       <span className="text-[10px] text-stone-500 font-bold block mt-2 text-right">
-                        {countOwned} de {sec.stickersCount} coladas
+                        {countOwned} de {totalSecStickers} coladas
                       </span>
                     </div>
                   );
@@ -1457,34 +1853,34 @@ export default function App() {
               </div>
             </div>
 
-            {/* Administracao Tecnica (Backups e resets) */}
+            {/* Backup & System reset panel */}
             <div className="bg-[#1a0505] border border-stone-800 text-stone-200 rounded-2xl p-6 shadow-2xl space-y-4 text-left">
               <h3 className="text-lg font-black text-amber-400 uppercase tracking-wide font-display">⚙️ Gerenciamento Técnico do Álbum</h3>
-              <p className="text-xs text-stone-500">
-                Aqui você pode gerenciar seu backup e restaurar estados locais para sincronizar dados offline e online de forma segura.
+              <p className="text-xs text-stone-500 font-sans">
+                Gerencie seus códigos de backup locais, restaure dados de fotos de teste offline ou redefina o progresso total de forma segura.
               </p>
               <div className="flex flex-wrap gap-3 pt-2">
                 <button
                   onClick={exportStateCode}
-                  className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold uppercase px-4 py-3 rounded-xl transition"
+                  className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
                 >
                   📥 Exportar Backup
                 </button>
                 <button
                   onClick={importStateCode}
-                  className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold uppercase px-4 py-3 rounded-xl transition"
+                  className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
                 >
                   📤 Importar Backup
                 </button>
                 <button
                   onClick={resetToPhotos}
-                  className="bg-amber-600/90 hover:bg-amber-700 text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition"
+                  className="bg-amber-600/90 hover:bg-amber-700 text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
                 >
                   📸 Restaurar Fotos Originais
                 </button>
                 <button
                   onClick={clearProgressTotal}
-                  className="bg-rose-700/90 hover:bg-rose-800 text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition"
+                  className="bg-rose-700/90 hover:bg-rose-800 text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
                 >
                   🚨 Zerar Tudo
                 </button>
@@ -1504,7 +1900,7 @@ export default function App() {
                 <span>Painel Social de Trocas de Figurinhas</span>
               </h2>
               <p className="text-stone-400 text-sm mt-1 font-sans">
-                Gere seu código curto de compartilhamento, envie para seus amigos e cruze as listas em tempo real para descobrir "trocas ideais" com brilho holográfico dourado automático!
+                Crie seu código único de trocas, envie para seus amigos de colecionismo e cruze as listas em tempo real para encontrar figurinhas repetidas compatíveis com brilho holográfico dourado automático!
               </p>
             </div>
 
@@ -1539,11 +1935,11 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    <p className="text-xs text-stone-500">Você ainda não tem um link de compartilhamento ativo.</p>
+                    <p className="text-xs text-stone-500 font-sans">Você ainda não tem um link de compartilhamento ativo.</p>
                     <button
                       onClick={generateMyShareLink}
                       disabled={generatingShare}
-                      className="bg-[#6b0b0b] hover:bg-[#8f1212] border border-[#d4af37]/20 text-white px-5 py-3 rounded-xl text-xs font-bold uppercase tracking-wider smooth-transition shadow flex items-center gap-1.5"
+                      className="bg-[#6b0b0b] hover:bg-[#8f1212] border border-[#d4af37]/20 text-white px-5 py-3 rounded-xl text-xs font-bold uppercase tracking-wider smooth-transition shadow flex items-center gap-1.5 cursor-pointer"
                     >
                       <Sparkles className="w-3.5 h-3.5 text-[#d4af37]" />
                       <span>{generatingShare ? "Gerando..." : "Gerar Link Compartilhável"}</span>
@@ -1560,7 +1956,7 @@ export default function App() {
                 </h3>
 
                 <div className="space-y-3">
-                  <p className="text-xs text-stone-500">Cole o código curto ou link de trocas do seu amigo:</p>
+                  <p className="text-xs text-stone-500 font-sans">Cole o código curto ou link de trocas do seu amigo:</p>
                   <div className="flex gap-2">
                     <input
                       type="text"
@@ -1572,7 +1968,7 @@ export default function App() {
                     <button
                       onClick={() => loadFriendShare(friendShareId)}
                       disabled={loadingFriend}
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 border border-emerald-500/20 rounded-xl text-xs font-bold uppercase smooth-transition shrink-0"
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 border border-emerald-500/20 rounded-xl text-xs font-bold uppercase smooth-transition shrink-0 cursor-pointer"
                     >
                       {loadingFriend ? "Buscando..." : "Cruzar Listas"}
                     </button>
@@ -1622,7 +2018,7 @@ export default function App() {
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs text-stone-500 mt-4 italic">Nenhuma figurinha repetida minha serve para o álbum dele de momento.</p>
+                      <p className="text-xs text-stone-500 mt-4 italic font-sans">Nenhuma figurinha repetida minha serve para o álbum dele de momento.</p>
                     )}
                   </div>
 
@@ -1644,7 +2040,7 @@ export default function App() {
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs text-stone-500 mt-4 italic">Ele não possui nenhuma repetida que esteja faltando no meu álbum.</p>
+                      <p className="text-xs text-stone-500 mt-4 italic font-sans">Ele não possui nenhuma repetida que esteja faltando no meu álbum.</p>
                     )}
                   </div>
 
@@ -1653,12 +2049,12 @@ export default function App() {
                 {matchTrades.canGive.length > 0 && matchTrades.canGet.length > 0 ? (
                   <div className="bg-emerald-950/20 border border-emerald-500/25 p-4 rounded-xl flex items-center gap-3">
                     <Sparkles className="w-6 h-6 text-[#d4af37]" />
-                    <p className="text-xs font-bold text-emerald-300">
-                      <strong>Troca Bilateral Perfeita Disponível!</strong> Vocês têm figurinhas repetidas compatíveis. Clique no botão de WhatsApp do cabeçalho ou combine o encontro para realizar a troca física!
+                    <p className="text-xs font-bold text-emerald-300 font-sans">
+                      <strong>Troca Bilateral Perfeita Disponível!</strong> Vocês têm figurinhas repetidas compatíveis. Combine o encontro para realizar a troca física!
                     </p>
                   </div>
                 ) : (
-                  <p className="text-[11px] text-stone-500 italic text-center">
+                  <p className="text-[11px] text-stone-500 italic text-center font-sans">
                     Cruze dados com outros amigos e encontre a compatibilidade perfeita.
                   </p>
                 )}

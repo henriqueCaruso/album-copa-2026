@@ -52,7 +52,9 @@ app.get("/api/health", (req, res) => {
 app.post("/api/gemini/analyze", upload.single("image"), async (req, res) => {
   try {
     const file = req.file;
-    const prefix = req.body.prefix || "BRA";
+    const pageId = req.body.pageId || "BRA-PAGE-01";
+    const stickerIdsStr = req.body.stickerIds || "";
+    const stickerIds = stickerIdsStr ? stickerIdsStr.split(",") : [];
 
     if (!file) {
        res.status(400).json({ error: "Nenhuma imagem foi enviada." });
@@ -69,12 +71,16 @@ app.post("/api/gemini/analyze", upload.single("image"), async (req, res) => {
       },
     };
 
-    const promptText = `Analise esta foto de uma página do álbum oficial da Copa do Mundo de 2026. 
-A página pertence à seleção com prefixo [${prefix}].
-Identifique todos os espaços numerados de 1 a 20.
-Retorne um objeto JSON contendo o prefixo exato (string), uma array 'filled' com os números das figurinhas que estão fisicamente coladas no espaço, e uma array 'empty' com os números das figurinhas que estão com o espaço em branco/vazio.
-O prefixo retornado no JSON deve ser exatamente o prefixo fornecido: "${prefix}".
-Seja extremamente preciso.`;
+    const promptText = `Analise esta foto de uma página do álbum oficial da Copa do Mundo de 2026.
+A página selecionada é a "[${pageId}]" correspondente aos seguintes adesivos (IDs): [${stickerIds.join(", ")}].
+Identifique o estado de preenchimento para cada um destes adesivos de forma extremamente precisa.
+Retorne um objeto JSON contendo:
+- "pageId": o ID exato da página fornecido: "${pageId}"
+- "detections": lista de objetos com "stickerId" (ex: "BRA_1") e "confidence" (float entre 0.0 e 1.0) para os adesivos que parecem estar fisicamente colados (alta confiança > 0.85).
+- "uncertainDetections": lista de objetos com "stickerId" (ex: "BRA_4"), "confidence" (float entre 0.0 e 1.0) e "reason" (string explicando o motivo da dúvida) para adesivos que estão com imagem borrada, cortada ou parcialmente encoberta.
+- "warnings": lista de avisos caso a qualidade da foto esteja ruim ou a página pareça incorreta.
+
+Apenas retorne adesivos que pertencem à lista fornecida.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
@@ -87,22 +93,42 @@ Seja extremamente preciso.`;
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            prefix: {
+            pageId: {
               type: Type.STRING,
-              description: "The 3-letter team prefix matching the page, exactly as requested."
+              description: "The unique ID of the scanned page."
             },
-            filled: {
+            detections: {
               type: Type.ARRAY,
-              items: { type: Type.INTEGER },
-              description: "List of sticker numbers (1 to 20) that are physically pasted on this page"
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  stickerId: { type: Type.STRING },
+                  confidence: { type: Type.NUMBER }
+                },
+                required: ["stickerId", "confidence"]
+              },
+              description: "List of detected/filled stickers with high confidence (> 0.85)"
             },
-            empty: {
+            uncertainDetections: {
               type: Type.ARRAY,
-              items: { type: Type.INTEGER },
-              description: "List of sticker numbers (1 to 20) that are blank/missing on this page"
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  stickerId: { type: Type.STRING },
+                  confidence: { type: Type.NUMBER },
+                  reason: { type: Type.STRING }
+                },
+                required: ["stickerId", "confidence", "reason"]
+              },
+              description: "List of stickers with lower confidence or visual occlusion"
+            },
+            warnings: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "Any warnings regarding page mismatch or image quality"
             }
           },
-          required: ["prefix", "filled", "empty"]
+          required: ["pageId", "detections", "uncertainDetections", "warnings"]
         }
       }
     });
