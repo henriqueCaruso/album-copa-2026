@@ -33,6 +33,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [viewFilter, setViewFilter] = useState<"all" | "missing" | "owned" | "repeated">("all");
   const [activeGroupFilter, setActiveGroupFilter] = useState<string>("all");
+  const [showIndex, setShowIndex] = useState(true);
+  const [highlightedCountry, setHighlightedCountry] = useState<string | null>(null);
 
   // Share system states
   const [myShareId, setMyShareId] = useState<string | null>(null);
@@ -146,6 +148,25 @@ export default function App() {
       loadFriendShare(shareId);
     }
   }, []);
+
+  const navigateToCountry = (id: string, group: string) => {
+    // Set group filter to "all" to make sure the selected country is visible
+    setActiveGroupFilter("all");
+    
+    // Set highlighted state
+    setHighlightedCountry(id);
+    setTimeout(() => {
+      setHighlightedCountry(null);
+    }, 2000);
+
+    // Scroll smoothly to target element
+    setTimeout(() => {
+      const element = document.getElementById(`country-${id}`);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, 150);
+  };
 
   const fetchUserShare = async (userId: string) => {
     try {
@@ -827,7 +848,7 @@ export default function App() {
               <div className="text-left">
                 <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Álbum Completado</span>
                 <p className="text-sm font-medium text-stone-300">
-                  <strong className="text-[#16a34a] text-lg font-black">{ownedStickers.length}</strong> de <strong className="font-bold text-stone-400">988</strong> coladas
+                  <strong className="text-[#16a34a] text-lg font-black">{ownedStickers.length}</strong> de <strong className="font-bold text-stone-400">{TOTAL_STICKERS}</strong> coladas
                 </p>
               </div>
             </div>
@@ -912,34 +933,119 @@ export default function App() {
           <div className="space-y-6">
             
             {/* Country Group Selection Filters */}
-            <div className="bg-[#1a0505] rounded-2xl border border-stone-800 p-4 shadow-2xl flex flex-wrap gap-1.5 justify-center">
-              <button
-                onClick={() => setActiveGroupFilter("all")}
-                className={`text-xs font-bold px-3 py-1.5 rounded-lg uppercase transition-all border ${
-                  activeGroupFilter === "all" ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800 hover:bg-stone-800 hover:text-stone-100"
-                }`}
-              >
-                Todas
-              </button>
-              <button
-                onClick={() => setActiveGroupFilter("especiais")}
-                className={`text-xs font-bold px-3 py-1.5 rounded-lg uppercase transition-all border ${
-                  activeGroupFilter === "especiais" ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800 hover:bg-stone-800 hover:text-stone-100"
-                }`}
-              >
-                🌟 Especiais
-              </button>
-              {["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"].map((grp) => (
+            <div className="bg-[#1a0505] rounded-2xl border border-stone-800 p-4 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Exibição:</span>
                 <button
-                  key={grp}
-                  onClick={() => setActiveGroupFilter(grp)}
-                  className={`text-xs font-bold px-3.5 py-1.5 rounded-lg uppercase transition-all border ${
-                    activeGroupFilter === grp ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800 hover:bg-stone-800 hover:text-stone-100"
+                  onClick={() => setActiveGroupFilter("all")}
+                  className={`text-xs font-bold px-3 py-1.5 rounded-lg uppercase transition-all border ${
+                    activeGroupFilter === "all" ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800 hover:bg-stone-800 hover:text-stone-100"
                   }`}
                 >
-                  G-{grp}
+                  Todas
                 </button>
-              ))}
+                <button
+                  onClick={() => setActiveGroupFilter("especiais")}
+                  className={`text-xs font-bold px-3 py-1.5 rounded-lg uppercase transition-all border ${
+                    activeGroupFilter === "especiais" ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800 hover:bg-stone-800 hover:text-stone-100"
+                  }`}
+                >
+                  🌟 Especiais
+                </button>
+              </div>
+              
+              <div className="flex flex-wrap items-center gap-1.5 justify-center">
+                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block mr-1">Grupos:</span>
+                {["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"].map((grp) => (
+                  <button
+                    key={grp}
+                    onClick={() => setActiveGroupFilter(grp)}
+                    className={`w-8 h-8 rounded-lg font-black text-xs uppercase flex items-center justify-center transition-all border ${
+                      activeGroupFilter === grp ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800 hover:bg-stone-800 hover:text-stone-100"
+                    }`}
+                  >
+                    {grp}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Interactive Album Index & Flag Viewer */}
+            <div className="bg-[#1a0505] rounded-2xl border border-stone-800 p-5 shadow-2xl space-y-4 text-left">
+              <div className="flex justify-between items-center border-b border-stone-800/80 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-[#d4af37] text-lg">📖</span>
+                  <h3 className="text-sm font-extrabold uppercase tracking-widest text-stone-200 font-display">
+                    Índice Oficial & Mapa de Bandeiras do Álbum
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setShowIndex(!showIndex)}
+                  className="text-xs font-bold text-stone-400 hover:text-stone-100 bg-stone-900 border border-stone-800 px-3 py-1.5 rounded-lg smooth-transition"
+                >
+                  {showIndex ? "Recolher Índice ▵" : "Ver Índice Completo (Bandeiras) ▿"}
+                </button>
+              </div>
+
+              {showIndex && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  className="space-y-4 overflow-hidden"
+                >
+                  <p className="text-xs text-stone-500">
+                    Clique em qualquer seleção para navegar instantaneamente até a página correspondente no álbum.
+                  </p>
+                  
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2.5">
+                    {albumSections.map((sec) => {
+                      const nameParts = sec.name.split(" ");
+                      const flag = nameParts[0] || "🏳️";
+                      const cleanName = nameParts.slice(1).join(" ") || sec.name;
+
+                      let secOwned = 0;
+                      for (let i = 1; i <= sec.stickersCount; i++) {
+                        if (ownedStickers.includes(`${sec.prefix}_${i}`)) secOwned++;
+                      }
+                      const pct = Math.round((secOwned / sec.stickersCount) * 100);
+                      const isComplete = pct === 100;
+
+                      return (
+                        <button
+                          key={sec.id}
+                          onClick={() => navigateToCountry(sec.id, sec.group)}
+                          className={`flex flex-col justify-between p-2.5 rounded-xl text-left border transition-all hover:scale-[1.03] duration-300 ${
+                            isComplete
+                              ? "bg-emerald-950/20 border-emerald-500/30 hover:border-emerald-500/60"
+                              : "bg-stone-900/40 border-stone-800/80 hover:border-[#d4af37]/30"
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 justify-between">
+                            <span className="text-xl shrink-0" title={cleanName}>{flag}</span>
+                            <span className="text-[9px] font-black text-stone-500 uppercase tracking-tight">{sec.prefix}</span>
+                          </div>
+                          <div className="mt-1.5">
+                            <span className="text-[10px] font-bold text-stone-300 truncate block leading-tight">
+                              {cleanName}
+                            </span>
+                            <div className="flex items-center justify-between gap-1 mt-1">
+                              <div className="w-full bg-stone-950 h-1 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full ${isComplete ? "bg-emerald-400" : "bg-[#d4af37]"}`}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                              <span className={`text-[8px] font-extrabold shrink-0 ${isComplete ? "text-emerald-400" : "text-stone-400"}`}>
+                                {pct}%
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
             </div>
 
             {/* Render Countries Panels */}
@@ -989,7 +1095,12 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.98 }}
                       animate={{ opacity: 1, scale: 1 }}
                       key={section.id}
-                      className="bg-[#1a0505] rounded-2xl border border-stone-800 p-5 shadow-2xl space-y-4 smooth-transition"
+                      id={`country-${section.id}`}
+                      className={`bg-[#1a0505] rounded-2xl p-5 shadow-2xl space-y-4 transition-all duration-500 border ${
+                        highlightedCountry === section.id
+                          ? "border-[#d4af37] ring-4 ring-[#d4af37]/25 scale-[1.01]"
+                          : "border-stone-800"
+                      }`}
                     >
                       {/* Section Title */}
                       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-stone-800/80 pb-3 gap-2">
