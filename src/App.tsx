@@ -59,7 +59,12 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [viewFilter, setViewFilter] = useState<"all" | "missing" | "owned" | "repeated">("all");
   const [activeGroupFilter, setActiveGroupFilter] = useState<string>("all");
-  const [showIndex, setShowIndex] = useState(true);
+  const [showIndex, setShowIndex] = useState(false);
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setShowIndex(window.innerWidth >= 768);
+    }
+  }, []);
   const [highlightedCountry, setHighlightedCountry] = useState<string | null>(null);
 
   // Share system states
@@ -973,7 +978,7 @@ export default function App() {
   };
 
   return (
-    <div className="bg-[#0f0303] text-stone-200 min-h-screen flex flex-col font-sans selection:bg-[#6b0b0b] selection:text-white pb-12">
+    <div className="bg-[#0f0303] text-stone-200 min-h-screen flex flex-col font-sans selection:bg-[#6b0b0b] selection:text-white pb-20 md:pb-12">
       
       {/* Toast Notifications */}
       <AnimatePresence>
@@ -1024,27 +1029,28 @@ export default function App() {
       )}
 
       {/* Header Panel */}
-      <header className="bg-[#1a0505] text-stone-200 mt-6 mx-4 md:mx-8 p-6 border border-stone-800 rounded-2xl shadow-xl relative overflow-hidden">
+      <header className="bg-[#1a0505] text-stone-200 mt-3 mx-2.5 md:mt-6 md:mx-8 p-3 md:p-6 border border-stone-800 rounded-xl md:rounded-2xl shadow-xl relative overflow-hidden">
         <div className="absolute inset-0 bg-opacity-5 bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:16px_16px] pointer-events-none" />
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row items-center justify-between gap-6 relative z-10">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4 relative z-10">
           
-          <div className="text-center lg:text-left flex items-center gap-4 justify-center lg:justify-start">
-            <div className="w-12 h-12 bg-[#6b0b0b] rounded-xl flex items-center justify-center border border-[#d4af37]/30 shadow-md shrink-0">
-              <span className="text-[#d4af37] font-extrabold text-2xl font-display">26</span>
+          <div className="flex items-center gap-2 md:gap-4 justify-start">
+            <div className="w-9 h-9 md:w-12 md:h-12 bg-[#6b0b0b] rounded-lg md:rounded-xl flex items-center justify-center border border-[#d4af37]/30 shadow-md shrink-0">
+              <span className="text-[#d4af37] font-extrabold text-lg md:text-2xl font-display">26</span>
             </div>
             <div className="text-left">
-              <h1 className="text-2xl font-black tracking-tight text-stone-100 uppercase font-display flex items-center gap-2">
-                🏆 Álbum Copa 2026
+              <h1 className="text-base md:text-2xl font-black tracking-tight text-stone-100 uppercase font-display flex items-center gap-1 md:gap-2 leading-tight">
+                🏆 <span className="hidden sm:inline">Álbum Copa 2026</span><span className="sm:hidden">Álbum 2026</span>
               </h1>
-              <p className="text-xs text-stone-500 font-medium uppercase tracking-widest mt-0.5">
+              <p className="hidden md:block text-xs text-stone-500 font-medium uppercase tracking-widest mt-0.5">
                 SaaS Multi-usuário com Gemini Vision
               </p>
             </div>
           </div>
 
           {/* Nav & Social Auth Buttons */}
-          <div className="flex flex-wrap items-center justify-center gap-4">
-            <div className="flex bg-stone-900/80 p-1 rounded-xl border border-stone-800">
+          <div className="flex items-center gap-2 md:gap-4 shrink-0">
+            {/* Desktop Navigation Tab selector */}
+            <div className="hidden md:flex bg-stone-900/80 p-1 rounded-xl border border-stone-800">
               <button
                 onClick={() => { setActiveTab("album"); setViewingFriend(false); }}
                 className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold uppercase tracking-wider smooth-transition ${
@@ -1083,19 +1089,19 @@ export default function App() {
 
             {/* Auth Block */}
             {profile ? (
-              <div className="flex items-center gap-3 bg-stone-900 border border-stone-800 p-1.5 pr-3 rounded-full">
+              <div className="flex items-center gap-1.5 md:gap-3 bg-stone-900 border border-stone-800 p-1 md:p-1.5 md:pr-3 rounded-full">
                 <img
                   src={profile.photoURL}
                   alt={profile.name}
-                  className="w-8 h-8 rounded-full object-cover border border-[#d4af37]"
+                  className="w-7 h-7 md:w-8 md:h-8 rounded-full object-cover border border-[#d4af37]"
                 />
-                <div className="hidden sm:block text-left">
+                <div className="hidden md:block text-left">
                   <p className="text-xs font-bold leading-none text-stone-200">{profile.name}</p>
                   <p className="text-[10px] text-stone-500 uppercase font-bold tracking-tighter mt-0.5">Colecionador</p>
                 </div>
                 <button
                   onClick={handleLogout}
-                  className="p-1.5 hover:bg-white/10 rounded-full text-stone-400 hover:text-rose-400 smooth-transition"
+                  className="p-1.5 hover:bg-white/10 rounded-full text-stone-400 hover:text-rose-400 smooth-transition min-h-[36px] min-w-[36px] flex items-center justify-center"
                   title="Desconectar"
                 >
                   <LogOut className="w-4 h-4" />
@@ -1104,10 +1110,11 @@ export default function App() {
             ) : (
               <button
                 onClick={handleLogin}
-                className="bg-stone-900 hover:bg-stone-800 text-stone-100 border border-stone-800 hover:border-[#d4af37]/30 px-4 py-2 rounded-xl text-xs font-bold uppercase flex items-center gap-2 smooth-transition shadow-lg"
+                className="bg-[#6b0b0b]/90 hover:bg-[#6b0b0b] text-stone-100 border border-stone-800 hover:border-[#d4af37]/30 px-3 py-1.5 md:px-4 md:py-2.5 rounded-xl text-[10px] md:text-xs font-bold uppercase flex items-center gap-1.5 smooth-transition shadow-lg min-h-[38px]"
               >
-                <LogIn className="w-4 h-4 text-[#d4af37]" />
-                <span>Entrar com Google</span>
+                <LogIn className="w-3.5 h-3.5 text-[#d4af37]" />
+                <span className="hidden sm:inline">Entrar com Google</span>
+                <span className="sm:hidden">Entrar</span>
               </button>
             )}
           </div>
@@ -1116,107 +1123,205 @@ export default function App() {
       </header>
 
       {/* Real-time Sticky Counter Dashboard */}
-      <div className="bg-[#1a0505]/95 border-b border-stone-800/80 shadow-2xl py-4 px-4 md:px-8 sticky top-0 z-30 transition-all backdrop-blur-md">
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row gap-6 items-center justify-between">
-          
-          {/* Progress Circular representation */}
-          <div className="w-full lg:w-auto flex items-center gap-4 justify-between lg:justify-start">
-            <div className="flex items-center gap-3">
-              <div className="relative flex items-center justify-center">
-                <svg className="w-14 h-14 transform -rotate-90">
-                  <circle cx="28" cy="28" r="24" stroke="#292524" strokeWidth="5" fill="transparent" />
-                  <circle
-                    cx="28"
-                    cy="28"
-                    r="24"
-                    stroke="#16a34a"
-                    strokeWidth="5"
-                    fill="transparent"
-                    strokeDasharray="150.8"
-                    strokeDashoffset={150.8 - (globalProgressPercent / 100) * 150.8}
-                    className="transition-all duration-700 ease-out"
-                  />
-                </svg>
-                <span className="absolute text-xs font-black text-stone-200">{globalProgressPercent}%</span>
+      <div className="bg-[#1a0505]/95 border-b border-stone-800/80 shadow-2xl py-3 px-3 md:py-4 md:px-8 sticky top-0 z-30 transition-all backdrop-blur-md">
+        <div className="max-w-7xl mx-auto">
+          {/* Mobile Dashboard */}
+          <div className="flex flex-col gap-2.5 md:hidden">
+            {/* Row 1: circular progress + stats cards */}
+            <div className="flex items-center justify-between gap-3 w-full">
+              <div className="flex items-center gap-2">
+                <div className="relative flex items-center justify-center shrink-0">
+                  <svg className="w-10 h-10 transform -rotate-90">
+                    <circle cx="20" cy="20" r="17" stroke="#292524" strokeWidth="3" fill="transparent" />
+                    <circle
+                      cx="20"
+                      cy="20"
+                      r="17"
+                      stroke="#16a34a"
+                      strokeWidth="3"
+                      fill="transparent"
+                      strokeDasharray="106.8"
+                      strokeDashoffset={106.8 - (globalProgressPercent / 100) * 106.8}
+                      className="transition-all duration-700 ease-out"
+                    />
+                  </svg>
+                  <span className="absolute text-[9px] font-black text-stone-200">{globalProgressPercent}%</span>
+                </div>
+                <div className="text-left">
+                  <span className="text-[8px] text-stone-500 font-bold uppercase tracking-widest block">Álbum</span>
+                  <p className="text-xs font-semibold text-stone-300">
+                    <strong className="text-[#16a34a] text-sm font-black">{ownedStickers.length}</strong> / <strong className="font-bold text-stone-400">{TOTAL_STICKERS}</strong>
+                  </p>
+                </div>
               </div>
-              <div className="text-left">
-                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Álbum Completado</span>
-                <p className="text-sm font-medium text-stone-300">
-                  <strong className="text-[#16a34a] text-lg font-black">{ownedStickers.length}</strong> de <strong className="font-bold text-stone-400">{TOTAL_STICKERS}</strong> coladas
-                </p>
+
+              <div className="flex gap-1.5 shrink-0">
+                <div className="bg-stone-900 border border-stone-800/80 rounded-lg px-2 py-0.5 text-center min-w-[64px]">
+                  <span className="text-[7px] text-stone-500 font-bold uppercase block">Faltantes</span>
+                  <span className="text-xs font-black text-[#f87171]">{globalMissingCount}</span>
+                </div>
+                <div className="bg-stone-900 border border-stone-800/80 rounded-lg px-2 py-0.5 text-center min-w-[64px]">
+                  <span className="text-[7px] text-stone-500 font-bold uppercase block">Repetidas</span>
+                  <span className="text-xs font-black text-[#fbbf24]">{repeatedStickers.length}</span>
+                </div>
               </div>
             </div>
 
-            <div className="h-8 w-px bg-stone-800 hidden sm:block" />
-
-            <div className="text-right sm:text-left">
-              <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Faltantes</span>
-              <span className="text-xl font-black text-[#6b0b0b]">{globalMissingCount}</span>
-            </div>
-
-            <div className="h-8 w-px bg-stone-800 hidden sm:block" />
-
-            <div className="text-right sm:text-left">
-              <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Repetidas</span>
-              <span className="text-xl font-black text-[#d4af37]">{repeatedStickers.length}</span>
-            </div>
-          </div>
-
-          {/* Social Friend Side-by-side indicator bar */}
-          {viewingFriend && friendProfile && (
-            <div className="bg-[#d4af37]/5 border border-[#d4af37]/30 rounded-xl px-4 py-2 flex items-center gap-3 animate-pulse">
-              <Users className="w-5 h-5 text-[#d4af37]" />
-              <div className="text-left">
-                <p className="text-xs font-black text-[#d4af37] uppercase">Visualizando Trocas Cruzadas</p>
-                <p className="text-[11px] text-stone-400">Com: <strong>{friendProfile.name}</strong> ({friendAlbum?.progressPercent || 0}% completo)</p>
+            {/* Friend info if viewing friend */}
+            {viewingFriend && friendProfile && (
+              <div className="bg-[#d4af37]/5 border border-[#d4af37]/30 rounded-lg px-3 py-1 flex items-center justify-between text-left">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-[#d4af37]" />
+                  <p className="text-[10px] text-stone-300 leading-tight">
+                    Trocas com: <strong>{friendProfile.name}</strong> ({friendAlbum?.progressPercent || 0}%)
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setViewingFriend(false);
+                    setFriendAlbum(null);
+                    setFriendProfile(null);
+                    showToast("Fechou painel de comparação social.", "info");
+                  }}
+                  className="text-[#d4af37] hover:text-white font-bold text-[10px] underline"
+                >
+                  Sair
+                </button>
               </div>
-              <button
-                onClick={() => {
-                  setViewingFriend(false);
-                  setFriendAlbum(null);
-                  setFriendProfile(null);
-                  showToast("Fechou painel de comparação social.", "info");
-                }}
-                className="text-[#d4af37] hover:text-white font-bold text-xs underline ml-2"
-              >
-                Sair
-              </button>
-            </div>
-          )}
+            )}
 
-          {/* Searching and quick filters */}
-          <div className="w-full lg:w-auto flex flex-wrap gap-2 items-center justify-end">
-            <div className="relative flex-1 lg:w-64">
-              <Search className="w-4 h-4 text-stone-500 absolute left-3 top-3.5" />
+            {/* Row 2: Search in full width */}
+            <div className="w-full relative">
+              <Search className="w-3.5 h-3.5 text-stone-500 absolute left-2.5 top-2.5" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Buscar país, número ou sigla..."
-                className="w-full pl-9 pr-4 py-2.5 bg-stone-900 border border-stone-800 rounded-xl focus:border-[#d4af37] outline-none text-xs md:text-sm text-stone-100 transition-all placeholder-stone-600"
+                className="w-full pl-8 pr-3 py-2 bg-stone-900 border border-stone-800 rounded-xl focus:border-[#d4af37] outline-none text-xs text-stone-100 placeholder-stone-600"
               />
             </div>
-            
-            <select
-              value={viewFilter}
-              onChange={(e) => setViewFilter(e.target.value as any)}
-              className="px-3 py-2.5 bg-stone-900 border border-stone-800 rounded-xl text-xs font-bold text-stone-400 outline-none cursor-pointer focus:border-[#d4af37]"
-            >
-              <option value="all">Todas as Figurinhas</option>
-              <option value="missing">Mostrar Faltantes</option>
-              <option value="owned">Mostrar Coladas</option>
-              <option value="repeated">Mostrar Repetidas</option>
-            </select>
 
-            <button
-              onClick={copyWhatsAppList}
-              className="bg-[#6b0b0b]/80 hover:bg-[#6b0b0b] text-[#d4af37] border border-[#d4af37]/30 font-bold px-3 py-2.5 rounded-xl text-xs uppercase tracking-wide transition active:scale-95 shadow flex items-center gap-1"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Compartilhar</span> Faltantes
-            </button>
+            {/* Row 3: Select and share */}
+            <div className="flex gap-2 w-full">
+              <select
+                value={viewFilter}
+                onChange={(e) => setViewFilter(e.target.value as any)}
+                className="flex-1 px-2 py-2 bg-stone-900 border border-stone-800 rounded-xl text-xs font-bold text-stone-400 outline-none cursor-pointer focus:border-[#d4af37]"
+              >
+                <option value="all">Todas as Figurinhas</option>
+                <option value="missing">Mostrar Faltantes</option>
+                <option value="owned">Mostrar Coladas</option>
+                <option value="repeated">Mostrar Repetidas</option>
+              </select>
+
+              <button
+                onClick={copyWhatsAppList}
+                className="bg-[#6b0b0b]/80 hover:bg-[#6b0b0b] text-[#d4af37] border border-[#d4af37]/30 font-bold px-3 py-2 rounded-xl text-xs uppercase tracking-wide transition active:scale-95 shadow flex items-center gap-1 shrink-0 justify-center min-h-[40px]"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Compartilhar</span>
+              </button>
+            </div>
           </div>
 
+          {/* Desktop Dashboard */}
+          <div className="hidden md:flex flex-col lg:flex-row gap-6 items-center justify-between">
+            <div className="flex items-center gap-4 justify-between lg:justify-start">
+              <div className="flex items-center gap-3">
+                <div className="relative flex items-center justify-center">
+                  <svg className="w-14 h-14 transform -rotate-90">
+                    <circle cx="28" cy="28" r="24" stroke="#292524" strokeWidth="5" fill="transparent" />
+                    <circle
+                      cx="28"
+                      cy="28"
+                      r="24"
+                      stroke="#16a34a"
+                      strokeWidth="5"
+                      fill="transparent"
+                      strokeDasharray="150.8"
+                      strokeDashoffset={150.8 - (globalProgressPercent / 100) * 150.8}
+                      className="transition-all duration-700 ease-out"
+                    />
+                  </svg>
+                  <span className="absolute text-xs font-black text-stone-200">{globalProgressPercent}%</span>
+                </div>
+                <div className="text-left">
+                  <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Álbum Completado</span>
+                  <p className="text-sm font-medium text-stone-300">
+                    <strong className="text-[#16a34a] text-lg font-black">{ownedStickers.length}</strong> de <strong className="font-bold text-stone-400">{TOTAL_STICKERS}</strong> coladas
+                  </p>
+                </div>
+              </div>
+
+              <div className="h-8 w-px bg-stone-800 hidden sm:block" />
+
+              <div className="text-right sm:text-left">
+                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Faltantes</span>
+                <span className="text-xl font-black text-[#6b0b0b]">{globalMissingCount}</span>
+              </div>
+
+              <div className="h-8 w-px bg-stone-800 hidden sm:block" />
+
+              <div className="text-right sm:text-left">
+                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Repetidas</span>
+                <span className="text-xl font-black text-[#d4af37]">{repeatedStickers.length}</span>
+              </div>
+            </div>
+
+            {viewingFriend && friendProfile && (
+              <div className="bg-[#d4af37]/5 border border-[#d4af37]/30 rounded-xl px-4 py-2 flex items-center gap-3 animate-pulse">
+                <Users className="w-5 h-5 text-[#d4af37]" />
+                <div className="text-left">
+                  <p className="text-xs font-black text-[#d4af37] uppercase">Visualizando Trocas Cruzadas</p>
+                  <p className="text-[11px] text-stone-400">Com: <strong>{friendProfile.name}</strong> ({friendAlbum?.progressPercent || 0}% completo)</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setViewingFriend(false);
+                    setFriendAlbum(null);
+                    setFriendProfile(null);
+                    showToast("Fechou painel de comparação social.", "info");
+                  }}
+                  className="text-[#d4af37] hover:text-white font-bold text-xs underline ml-2"
+                >
+                  Sair
+                </button>
+              </div>
+            )}
+
+            <div className="w-full lg:w-auto flex flex-wrap gap-2 items-center justify-end">
+              <div className="relative flex-1 lg:w-64">
+                <Search className="w-4 h-4 text-stone-500 absolute left-3 top-3.5" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Buscar país, número ou sigla..."
+                  className="w-full pl-9 pr-4 py-2.5 bg-stone-900 border border-stone-800 rounded-xl focus:border-[#d4af37] outline-none text-xs md:text-sm text-stone-100 transition-all placeholder-stone-600"
+                />
+              </div>
+
+              <select
+                value={viewFilter}
+                onChange={(e) => setViewFilter(e.target.value as any)}
+                className="px-3 py-2.5 bg-stone-900 border border-stone-800 rounded-xl text-xs font-bold text-stone-400 outline-none cursor-pointer focus:border-[#d4af37]"
+              >
+                <option value="all">Todas as Figurinhas</option>
+                <option value="missing">Mostrar Faltantes</option>
+                <option value="owned">Mostrar Coladas</option>
+                <option value="repeated">Mostrar Repetidas</option>
+              </select>
+
+              <button
+                onClick={copyWhatsAppList}
+                className="bg-[#6b0b0b]/80 hover:bg-[#6b0b0b] text-[#d4af37] border border-[#d4af37]/30 font-bold px-3 py-2.5 rounded-xl text-xs uppercase tracking-wide transition active:scale-95 shadow flex items-center gap-1"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Compartilhar</span> Faltantes
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1226,8 +1331,8 @@ export default function App() {
         {activeTab === "album" && (
           <div className="space-y-6">
             
-            {/* Country Group Selection Filters */}
-            <div className="bg-[#1a0505] rounded-2xl border border-stone-800 p-4 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-4">
+            {/* Country Group Selection Filters - Desktop */}
+            <div className="hidden md:flex bg-[#1a0505] rounded-2xl border border-stone-800 p-4 shadow-2xl flex-row items-center justify-between gap-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Exibição:</span>
                 <button
@@ -1264,20 +1369,64 @@ export default function App() {
               </div>
             </div>
 
+            {/* Country Group Selection Filters - Mobile */}
+            <div className="md:hidden bg-[#1a0505] rounded-xl border border-stone-800 p-3 shadow-xl space-y-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] text-stone-500 font-extrabold uppercase tracking-widest">Exibição:</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveGroupFilter("all")}
+                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg uppercase border transition ${
+                    activeGroupFilter === "all" ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800"
+                  }`}
+                >
+                  Todas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveGroupFilter("especiais")}
+                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg uppercase border transition ${
+                    activeGroupFilter === "especiais" ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800"
+                  }`}
+                >
+                  🌟 Especiais
+                </button>
+              </div>
+              
+              <div className="flex items-center gap-2 border-t border-stone-800/60 pt-2">
+                <span className="text-[9px] text-stone-500 font-extrabold uppercase tracking-widest shrink-0">Grupos:</span>
+                <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none scroll-smooth w-full px-1" style={{ WebkitOverflowScrolling: "touch" }}>
+                  {["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"].map((grp) => (
+                    <button
+                      key={grp}
+                      type="button"
+                      onClick={() => setActiveGroupFilter(grp)}
+                      className={`w-8 h-8 shrink-0 rounded-lg font-black text-xs uppercase flex items-center justify-center transition border ${
+                        activeGroupFilter === grp ? "bg-[#6b0b0b] text-white border-[#d4af37]/20 shadow" : "bg-stone-900 text-stone-400 border-stone-800"
+                      }`}
+                    >
+                      {grp}
+                    </button>
+                  ))}
+                  <div className="w-4 shrink-0" />
+                </div>
+              </div>
+            </div>
+
             {/* Interactive Album Index & Flag Viewer */}
-            <div className="bg-[#1a0505] rounded-2xl border border-stone-800 p-5 shadow-2xl space-y-4 text-left">
+            <div className="bg-[#1a0505] rounded-2xl border border-stone-800 p-4 md:p-5 shadow-2xl space-y-4 text-left">
               <div className="flex justify-between items-center border-b border-stone-800/80 pb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-[#d4af37] text-lg">📖</span>
-                  <h3 className="text-sm font-extrabold uppercase tracking-widest text-stone-200 font-display">
+                  <h3 className="text-xs md:text-sm font-extrabold uppercase tracking-widest text-stone-200 font-display">
                     Índice Oficial & Mapa de Bandeiras do Álbum
                   </h3>
                 </div>
                 <button
                   onClick={() => setShowIndex(!showIndex)}
-                  className="text-xs font-bold text-stone-400 hover:text-stone-100 bg-stone-900 border border-stone-800 px-3 py-1.5 rounded-lg smooth-transition"
+                  className="text-[10px] md:text-xs font-bold text-stone-400 hover:text-stone-100 bg-stone-900 border border-stone-800 px-2.5 py-1.5 rounded-lg smooth-transition"
                 >
-                  {showIndex ? "Recolher Índice ▵" : "Ver Índice Completo (Bandeiras) ▿"}
+                  {showIndex ? "Recolher Índice ▵" : "Ver Índice Completo ▿"}
                 </button>
               </div>
 
@@ -1287,11 +1436,12 @@ export default function App() {
                   animate={{ opacity: 1, height: "auto" }}
                   className="space-y-4 overflow-hidden"
                 >
-                  <p className="text-xs text-stone-500">
+                  <p className="text-[10px] md:text-xs text-stone-500">
                     Clique em qualquer seleção para navegar instantaneamente até a página correspondente no álbum.
                   </p>
                   
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2.5">
+                  {/* Desktop Index Grid */}
+                  <div className="hidden md:grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2.5">
                     {countries.map((country) => {
                       let secOwned = 0;
                       let totalStickersSec = 0;
@@ -1336,6 +1486,53 @@ export default function App() {
                               </span>
                             </div>
                           </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Mobile Index Grid */}
+                  <div className="grid grid-cols-1 xs:grid-cols-2 gap-2 md:hidden">
+                    {countries.map((country) => {
+                      let secOwned = 0;
+                      let totalStickersSec = 0;
+
+                      country.pages.forEach((p) => {
+                        p.stickerIds.forEach((sid) => {
+                          totalStickersSec++;
+                          if (stickerCounts[sid] >= 1) secOwned++;
+                        });
+                      });
+
+                      const pct = Math.round((secOwned / totalStickersSec) * 100);
+                      const isComplete = pct === 100;
+
+                      return (
+                        <button
+                          key={country.id}
+                          type="button"
+                          onClick={() => navigateToCountry(country.id, country.group)}
+                          className={`flex items-center justify-between p-3.5 rounded-xl text-left border min-h-[48px] ${
+                            isComplete
+                              ? "bg-emerald-950/20 border-emerald-500/30"
+                              : "bg-stone-900/40 border-stone-800/80"
+                          }`}
+                          aria-label={`Ir para ${country.name}. Progresso: ${pct}%`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <CountryFlag iso2={country.iso2} name={country.name} fifaCode={country.fifaCode} size="sm" />
+                            <div className="min-w-0">
+                              <span className="text-xs font-bold text-stone-200 truncate block">
+                                {country.name}
+                              </span>
+                              <span className="text-[9px] font-black text-stone-500 block uppercase">
+                                {country.id} • {secOwned}/{totalStickersSec}
+                              </span>
+                            </div>
+                          </div>
+                          <span className={`text-[10px] font-black ml-2 shrink-0 ${isComplete ? "text-emerald-400" : "text-[#d4af37]"}`}>
+                            {pct}%
+                          </span>
                         </button>
                       );
                     })}
@@ -1446,10 +1643,15 @@ export default function App() {
                           return (
                             <div
                               key={stickerId}
-                              className="relative group rounded-xl overflow-hidden flex flex-col justify-between aspect-square"
+                              onClick={() => {
+                                if (window.innerWidth < 768) {
+                                  adjustStickerCount(stickerId, 1);
+                                }
+                              }}
+                              className="relative group rounded-xl overflow-hidden flex flex-col justify-between aspect-square cursor-pointer active:scale-95 transition-transform"
                             >
                               <div
-                                className={`w-full h-full py-3 px-1 rounded-xl text-xs md:text-sm font-black border flex flex-col items-center justify-center select-none smooth-transition relative ${
+                                className={`w-full h-full pt-2 pb-10 px-1 rounded-xl text-xs md:text-sm font-black border flex flex-col items-center justify-start select-none smooth-transition relative ${
                                   isRepeated
                                     ? "bg-amber-950/60 border-[#d4af37] text-[#d4af37] shadow-lg shadow-amber-950/40"
                                     : isOwned
@@ -1472,33 +1674,33 @@ export default function App() {
                                   </span>
                                 )}
 
-                                <span className={`block font-bold ${isOwned ? "scale-105 text-[#d4af37] md:text-emerald-200" : ""}`}>
+                                <span className={`block font-bold mt-2 ${isOwned ? "scale-105 text-[#d4af37] md:text-emerald-200" : ""}`}>
                                   {country.fifaCode} {num}
                                 </span>
 
-                                <span className="text-[9px] mt-1 font-extrabold uppercase tracking-wider opacity-80">
+                                <span className="text-[8px] md:text-[9px] mt-0.5 font-extrabold uppercase tracking-wider opacity-80">
                                   {isRepeated ? `Repetida (x${count})` : isOwned ? "Colada" : "Faltando"}
                                 </span>
 
                                 {/* Quick Increments and Decrements inside the sticker */}
-                                <div className="absolute inset-x-1 bottom-1 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity bg-stone-950/90 rounded-lg p-0.5">
+                                <div className="absolute inset-x-0 bottom-0 flex items-center justify-between opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity bg-stone-950 border-t border-stone-800/80 p-0.5">
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       adjustStickerCount(stickerId, -1);
                                     }}
-                                    className="p-1 text-rose-400 hover:text-rose-300 hover:bg-stone-800 rounded smooth-transition cursor-pointer"
+                                    className="p-2 min-h-[36px] min-w-[36px] flex items-center justify-center text-rose-400 hover:text-rose-300 hover:bg-stone-900 rounded-lg smooth-transition cursor-pointer"
                                     title="Diminuir"
                                   >
                                     <Minus className="w-3.5 h-3.5" />
                                   </button>
-                                  <span className="text-[10px] text-stone-200 font-mono font-bold">{count}</span>
+                                  <span className="text-[10px] text-stone-200 font-mono font-bold select-none">{count}</span>
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       adjustStickerCount(stickerId, 1);
                                     }}
-                                    className="p-1 text-emerald-400 hover:text-emerald-300 hover:bg-stone-800 rounded smooth-transition cursor-pointer"
+                                    className="p-2 min-h-[36px] min-w-[36px] flex items-center justify-center text-emerald-400 hover:text-emerald-300 hover:bg-stone-900 rounded-lg smooth-transition cursor-pointer"
                                     title="Aumentar"
                                   >
                                     <Plus className="w-3.5 h-3.5" />
@@ -2066,6 +2268,49 @@ export default function App() {
         )}
 
       </main>
+
+      {/* Mobile Fixed Bottom Navigation Bar */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[#1a0505] border-t border-stone-800 px-4 py-2 z-40 flex items-center justify-around shadow-lg">
+        <button
+          onClick={() => { setActiveTab("album"); setViewingFriend(false); }}
+          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider smooth-transition min-h-[44px] justify-center ${
+            activeTab === "album" && !viewingFriend ? "text-[#d4af37]" : "text-stone-400"
+          }`}
+        >
+          <span className="text-lg">📖</span>
+          <span>Álbum</span>
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("ia"); setViewingFriend(false); }}
+          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider smooth-transition min-h-[44px] justify-center ${
+            activeTab === "ia" && !viewingFriend ? "text-[#d4af37]" : "text-stone-400"
+          }`}
+        >
+          <Camera className="w-4 h-4" />
+          <span>Escanear</span>
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("stats"); setViewingFriend(false); }}
+          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider smooth-transition min-h-[44px] justify-center ${
+            activeTab === "stats" && !viewingFriend ? "text-[#d4af37]" : "text-stone-400"
+          }`}
+        >
+          <TrendingUp className="w-4 h-4" />
+          <span>Stats</span>
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("social"); }}
+          className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-black uppercase tracking-wider smooth-transition min-h-[44px] justify-center ${
+            activeTab === "social" || viewingFriend ? "text-[#d4af37]" : "text-stone-400"
+          }`}
+        >
+          <Users className="w-4 h-4" />
+          <span>Trocas</span>
+        </button>
+      </div>
 
     </div>
   );
