@@ -68,14 +68,11 @@ service cloud.firestore {
     }
 
     function isValidActivityLog(data) {
-      return data.keys().hasAll(['userId', 'type', 'description', 'timestamp'])
-        && data.keys().size() == 4
+      return data.keys().hasAll(['userId', 'type', 'timestamp'])
         && data.userId is string
         && data.userId.size() <= 128
         && data.type is string
-        && (data.type == 'stickers_added' || data.type == 'milestone' || data.type == 'trade')
-        && data.description is string
-        && data.description.size() <= 256
+        && (data.type == 'stickers_added' || data.type == 'milestone' || data.type == 'trade' || data.type == 'progress_recovery')
         && data.timestamp == request.time;
     }
 

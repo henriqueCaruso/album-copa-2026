@@ -31,29 +31,33 @@ describe('Merge Progress Snapshots', () => {
 
     const merged = mergeProgressSnapshots(firestore, localV2, legacyOwned, legacyRepeated);
 
-    expect(merged['BRA_1']).toBe(2); // localV2 is higher
-    expect(merged['BRA_2']).toBe(1); // localV2 is higher
-    expect(merged['BRA_3']).toBe(3); // firestore is higher
-    expect(merged['BRA_4']).toBe(2); // legacyRepeated is higher
-    expect(merged['BRA_5']).toBe(2); // legacyRepeated
+    expect(merged.counts['BRA_1']).toBe(2); // localV2 is higher
+    expect(merged.counts['BRA_2']).toBe(1); // localV2 is higher
+    expect(merged.counts['BRA_3']).toBe(3); // firestore is higher
+    expect(merged.counts['BRA_4']).toBe(2); // legacyRepeated is higher
+    expect(merged.counts['BRA_5']).toBe(2); // legacyRepeated
   });
 
   test('preserves count 2+', () => {
     const firestore = { 'BRA_1': 5 };
     const localV2 = { 'BRA_1': 1 };
     const merged = mergeProgressSnapshots(firestore, localV2, {}, {});
-    expect(merged['BRA_1']).toBe(5);
+    expect(merged.counts['BRA_1']).toBe(5);
   });
 
   test('handles empty inputs', () => {
     const merged = mergeProgressSnapshots({}, {}, {}, {});
-    expect(Object.keys(merged).length).toBe(0);
+    expect(Object.keys(merged.counts).length).toBe(0);
   });
 
-  test('ignores invalid IDs during merge', () => {
+  test('ignores invalid IDs during merge and collects them', () => {
     const firestore = { 'INVALID_ID': 5, 'BRA_1': 1 };
     const merged = mergeProgressSnapshots(firestore, {}, {}, {});
-    expect(merged['INVALID_ID']).toBeUndefined();
-    expect(merged['BRA_1']).toBe(1);
+    expect(merged.counts['INVALID_ID']).toBeUndefined();
+    expect(merged.counts['BRA_1']).toBe(1);
+    expect(merged.invalidIds.length).toBe(1);
+    expect(merged.invalidIds[0].id).toBe('INVALID_ID');
+    expect(merged.invalidIds[0].source).toBe('firestore');
+    expect(merged.invalidIds[0].rawCount).toBe(5);
   });
 });

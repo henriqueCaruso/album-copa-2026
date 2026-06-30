@@ -11,7 +11,7 @@ import {
 } from "./firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
-  doc, getDoc, setDoc, onSnapshot, collection, writeBatch, serverTimestamp, runTransaction
+  doc, getDoc, setDoc, onSnapshot, collection, writeBatch, serverTimestamp, runTransaction, Timestamp
 } from "firebase/firestore";
 import {
   countries, pagesMap, stickersMap, totalAlbumStickers, TOTAL_STICKERS, missingFromPhotos, albumSections
@@ -54,6 +54,7 @@ export default function App() {
   const [stickerCounts, setStickerCounts] = useState<Record<string, number>>({});
   const [completedPages, setCompletedPages] = useState<string[]>([]);
   const [loadingAlbum, setLoadingAlbum] = useState(false);
+  const [savingStickerIds, setSavingStickerIds] = useState<Set<string>>(new Set());
 
   // Derived arrays for backward compatibility and quick checking
   const ownedStickers = useMemo(() => Object.keys(stickerCounts).filter(id => stickerCounts[id] >= 1), [stickerCounts]);
@@ -285,10 +286,10 @@ export default function App() {
 
   const fetchUserShare = async (userId: string) => {
     try {
-      const shareDocRef = doc(db, "trade_shares", userId);
-      const shareSnap = await getDoc(shareDocRef);
-      if (shareSnap.exists()) {
-        setMyShareId(shareSnap.data().shareId);
+      const settingsRef = doc(db, "users", userId, "settings", "sharing");
+      const settingsSnap = await getDoc(settingsRef);
+      if (settingsSnap.exists() && settingsSnap.data().activeShareId) {
+        setMyShareId(settingsSnap.data().activeShareId);
       }
     } catch (e) {
       console.warn("Share retrieval skipped:", e);
@@ -299,45 +300,116 @@ export default function App() {
   const setStickerCount = async (stickerId: string, absoluteCount: number) => {
     if (absoluteCount < 0 || isNaN(absoluteCount)) return;
 
-    // Optimistic client-side state update
-    const nextCounts = { ...stickerCounts, [stickerId]: absoluteCount };
-    if (absoluteCount === 0) {
-      delete nextCounts[stickerId];
+    if (!user) {
+      setStickerCounts((prev) => {
+        const next = { ...prev, [stickerId]: absoluteCount };
+        if (absoluteCount === 0) delete next[stickerId];
+        saveLocalAlbumSnapshot(next);
+        return next;
+      });
+      showToast(`Quantidade atualizada para ${absoluteCount} (Salvo localmente).`, "info");
+      return;
     }
-    setStickerCounts(nextCounts);
-    saveLocalAlbumSnapshot(nextCounts);
 
-    if (user) {
+    setSavingStickerIds(prev => new Set(prev).add(stickerId));
+    // Optimistic client-side state update
+    setStickerCounts(prev => {
+      const nextCounts = { ...prev, [stickerId]: absoluteCount };
+      if (absoluteCount === 0) {
+        delete nextCounts[stickerId];
+      }
+      return nextCounts;
+    });
+
+    try {
+      const stickerRef = doc(db, "users", user.uid, "stickers", stickerId);
+      await runTransaction(db, async (transaction) => {
+        await transaction.get(stickerRef);
+        transaction.set(stickerRef, {
+          stickerId,
+          ownedCount: absoluteCount,
+          isOwned: absoluteCount >= 1,
+          isDuplicate: absoluteCount >= 2,
+          source: "manual",
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      });
+    } catch (err) {
+      console.error("Error saving sticker manual adjustment:", err);
+      showToast("Erro ao sincronizar alteração na nuvem.", "error");
+      // Rollback
       try {
         const stickerRef = doc(db, "users", user.uid, "stickers", stickerId);
-        
-        await runTransaction(db, async (transaction) => {
-          transaction.set(stickerRef, {
-            stickerId,
-            ownedCount: absoluteCount,
-            isOwned: absoluteCount >= 1,
-            isDuplicate: absoluteCount >= 2,
-            source: "manual",
-            updatedAt: serverTimestamp()
-          }, { merge: true });
+        const snap = await getDoc(stickerRef);
+        setStickerCounts(prev => {
+          const next = { ...prev };
+          if (snap.exists() && snap.data().ownedCount > 0) {
+            next[stickerId] = snap.data().ownedCount;
+          } else {
+            delete next[stickerId];
+          }
+          return next;
         });
-      } catch (err) {
-        console.error("Error saving sticker manual adjustment:", err);
-        showToast("Erro ao sincronizar alteração na nuvem.", "error");
-      }
-    } else {
-      showToast(
-        `Quantidade atualizada para ${absoluteCount} (Salvo localmente).`,
-        "info"
-      );
+      } catch (e) {}
+    } finally {
+      setSavingStickerIds(prev => {
+        const next = new Set(prev);
+        next.delete(stickerId);
+        return next;
+      });
     }
   };
 
   const adjustStickerCount = async (stickerId: string, delta: number) => {
-    const currentCount = stickerCounts[stickerId] || 0;
-    const nextCount = Math.max(0, currentCount + delta);
-    if (nextCount === currentCount) return;
-    await setStickerCount(stickerId, nextCount);
+    if (!user) {
+      setStickerCounts((prev) => {
+        const current = prev[stickerId] || 0;
+        const nextCount = Math.max(0, current + delta);
+        if (nextCount === current) return prev;
+        const next = { ...prev, [stickerId]: nextCount };
+        if (nextCount === 0) delete next[stickerId];
+        saveLocalAlbumSnapshot(next);
+        return next;
+      });
+      return;
+    }
+
+    if (savingStickerIds.has(stickerId)) return;
+    setSavingStickerIds(prev => new Set(prev).add(stickerId));
+
+    try {
+      const stickerRef = doc(db, "users", user.uid, "stickers", stickerId);
+      let finalCount = 0;
+      await runTransaction(db, async (transaction) => {
+        const docSnap = await transaction.get(stickerRef);
+        const remoteCount = docSnap.exists() ? (docSnap.data().ownedCount || 0) : 0;
+        finalCount = Math.max(0, remoteCount + delta);
+        
+        transaction.set(stickerRef, {
+          stickerId,
+          ownedCount: finalCount,
+          isOwned: finalCount >= 1,
+          isDuplicate: finalCount >= 2,
+          source: "manual",
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      });
+
+      setStickerCounts(prev => {
+        const next = { ...prev, [stickerId]: finalCount };
+        if (finalCount === 0) delete next[stickerId];
+        return next;
+      });
+    } catch (err) {
+      console.error("Error adjusting sticker count:", err);
+      showToast("Erro ao sincronizar alteração na nuvem.", "error");
+    } finally {
+      setSavingStickerIds(prev => {
+        const next = new Set(prev);
+        next.delete(stickerId);
+        return next;
+      });
+    }
   };
 
   // Google Provider Login
@@ -361,7 +433,11 @@ export default function App() {
       setFriendProfile(null);
       setStickerCounts({}); // Clear private state
       setCompletedPages([]);
-      saveLocalAlbumSnapshot({}); // Clear local storage too on explicit logout? The prompt says "limpar corretamente os dados privados no logout."
+      // Reload visitor snapshot
+      const local = readLocalAlbumSnapshot();
+      if (local && local.counts) {
+        setStickerCounts(local.counts);
+      }
       showToast("Desconectado do Firebase.", "info");
     } catch (error) {
       showToast("Erro ao desconectar.", "error");
@@ -477,6 +553,7 @@ export default function App() {
     }
 
     setUploadedFile(file);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(file));
     setScanStatus("available");
     setScanErrorMsg(null);
@@ -517,10 +594,22 @@ export default function App() {
 
     try {
       setScanStatus("processing");
+      const idToken = await user.getIdToken();
+      
       const response = await fetch("/api/gemini/analyze", {
         method: "POST",
+        headers: {
+          Authorization: `Bearer ${idToken}`
+        },
         body: formData,
       });
+
+      if (response.status === 401) {
+        setScanStatus("failed");
+        setScanErrorMsg("Sessão expirada. Por favor, faça login novamente.");
+        showToast("Sessão expirada. Autenticação necessária.", "error");
+        return;
+      }
 
       if (!response.ok) {
         throw new Error("O servidor retornou um erro ao analisar com Gemini.");
@@ -629,7 +718,6 @@ export default function App() {
 
     try {
       const pageDef = pagesMap[selectedPageId];
-      const batch = writeBatch(db);
 
       const confirmedIds: string[] = [];
       const rejectedIds: string[] = [];
@@ -643,20 +731,6 @@ export default function App() {
 
         if (item.confirmed) {
           confirmedIds.push(item.id);
-          
-          // Increment or set count to 1 if it wasn't owned
-          const currentCount = stickerCounts[item.id] || 0;
-          const nextCount = Math.max(1, currentCount);
-
-          const stickerRef = doc(db, "users", user.uid, "stickers", item.id);
-          batch.set(stickerRef, {
-            stickerId: item.id,
-            ownedCount: nextCount,
-            isOwned: true,
-            isDuplicate: nextCount >= 2,
-            source: "scan",
-            updatedAt: serverTimestamp()
-          });
         } else {
           // If unconfirmed, but was previously owned, we do NOT touch it to avoid breaking pre-existing states
           // unless user wants to explicitly clear it. Let's keep it safe.
@@ -666,38 +740,64 @@ export default function App() {
         }
       }
 
-      // Write PageScan record to consume the read permanently
-      const pageScanRef = doc(db, "users", user.uid, "pageScans", selectedPageId);
-      batch.set(pageScanRef, {
-        pageId: selectedPageId,
-        countryId: pageDef.countryId,
-        status: "completed",
-        detectedStickerIds: detectedIds,
-        confirmedStickerIds: confirmedIds,
-        rejectedStickerIds: rejectedIds,
-        uncertainStickerIds: uncertainIds,
-        modelName: "gemini-3.5-flash",
-        imageHash: "",
-        scannedAt: serverTimestamp(),
-        confirmedAt: serverTimestamp(),
-        schemaVersion: 1
-      });
+      await runTransaction(db, async (transaction) => {
+        const pageScanRef = doc(db, "users", user.uid, "pageScans", selectedPageId);
+        const pageScanSnap = await transaction.get(pageScanRef);
 
-      // Save activity log
-      const logRef = doc(collection(db, "users", user.uid, "activity"));
-      batch.set(logRef, {
-        userId: user.uid,
-        type: "stickers_added",
-        description: `Concluiu leitura automática da página ${pageDef.title}.`,
-        timestamp: serverTimestamp()
-      });
+        if (pageScanSnap.exists() && pageScanSnap.data().status === "completed") {
+          throw new Error("Página já confirmada anteriormente.");
+        }
 
-      await batch.commit();
+        // Read all necessary stickers first
+        const stickerSnaps = await Promise.all(
+          confirmedIds.map(id => transaction.get(doc(db, "users", user.uid, "stickers", id)))
+        );
+
+        // Perform all writes
+        stickerSnaps.forEach((snap, idx) => {
+          const id = confirmedIds[idx];
+          const remoteCount = snap.exists() ? (snap.data().ownedCount || 0) : 0;
+          const nextCount = Math.max(1, remoteCount);
+
+          transaction.set(snap.ref, {
+            stickerId: id,
+            ownedCount: nextCount,
+            isOwned: true,
+            isDuplicate: nextCount >= 2,
+            source: "scan",
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+        });
+
+        transaction.set(pageScanRef, {
+          pageId: selectedPageId,
+          countryId: pageDef.countryId,
+          status: "completed",
+          detectedStickerIds: detectedIds,
+          confirmedStickerIds: confirmedIds,
+          rejectedStickerIds: rejectedIds,
+          uncertainStickerIds: uncertainIds,
+          modelName: "gemini-3.5-flash",
+          imageHash: "",
+          scannedAt: serverTimestamp(),
+          confirmedAt: serverTimestamp(),
+          schemaVersion: 1
+        });
+
+        const logRef = doc(collection(db, "users", user.uid, "activity"));
+        transaction.set(logRef, {
+          userId: user.uid,
+          type: "stickers_added",
+          description: `Concluiu leitura automática da página ${pageDef.title}.`,
+          timestamp: serverTimestamp()
+        });
+      });
 
       setScanStatus("completed");
       showToast("Página salva e sincronizada na nuvem com sucesso!", "success");
       
       // Cleanup
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
       setReviewStickers([]);
       setUploadedFile(null);
       setPreviewUrl(null);
@@ -708,17 +808,22 @@ export default function App() {
       if (countryObj) {
         navigateToCountry(countryObj.id, countryObj.group);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setScanStatus("failed");
-      setScanErrorMsg("Erro ao salvar os resultados na nuvem.");
-      showToast("Falha ao salvar progresso.", "error");
+      if (err.message === "Página já confirmada anteriormente.") {
+        showToast("Erro: Leitura já concluída para esta página.", "error");
+        setScanStatus("available");
+      } else {
+        setScanErrorMsg("Falha ao salvar as figurinhas lidas.");
+        setScanStatus("failed");
+      }
     }
   };
 
   const handleDiscardScan = () => {
     setReviewStickers([]);
     setUploadedFile(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
     setScanStatus("available");
     setScanErrorMsg(null);
@@ -753,11 +858,17 @@ export default function App() {
         missingStickerIds,
         repeatedCounts,
         updatedAt: serverTimestamp(),
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        expiresAt: Timestamp.fromDate(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
         isPublic: true
       };
 
       await setDoc(doc(db, "trade_shares", newShareId), shareDoc);
+      const settingsRef = doc(db, "users", user.uid, "settings", "sharing");
+      await setDoc(settingsRef, {
+        activeShareId: newShareId,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      
       setMyShareId(newShareId);
       showToast("Link de trocas atualizado e ativo por 30 dias!", "success");
     } catch (e) {
@@ -765,6 +876,22 @@ export default function App() {
       showToast("Falha ao criar link de compartilhamento.", "error");
     } finally {
       setGeneratingShare(false);
+    }
+  };
+
+  const disableMyShare = async () => {
+    if (!user || !myShareId) return;
+    try {
+      await setDoc(doc(db, "trade_shares", myShareId), { isPublic: false, updatedAt: serverTimestamp() }, { merge: true });
+      await setDoc(doc(db, "users", user.uid, "settings", "sharing"), {
+        activeShareId: null,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setMyShareId(null);
+      showToast("Compartilhamento desativado com sucesso.", "success");
+    } catch (e) {
+      console.error(e);
+      showToast("Falha ao desativar compartilhamento.", "error");
     }
   };
 
@@ -1802,13 +1929,14 @@ export default function App() {
                                 </span>
 
                                 {/* Quick Increments and Decrements inside the sticker */}
-                                <div className="absolute inset-x-0 bottom-0 flex items-center justify-between opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity bg-stone-950 border-t border-stone-800/80 p-0.5">
+                                <div className={`absolute inset-x-0 bottom-0 flex items-center justify-between opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity bg-stone-950 border-t border-stone-800/80 p-0.5 ${savingStickerIds.has(stickerId) ? "opacity-50 pointer-events-none" : ""}`}>
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       adjustStickerCount(stickerId, -1);
                                     }}
-                                    className="p-2 min-h-[36px] min-w-[36px] flex items-center justify-center text-rose-400 hover:text-rose-300 hover:bg-stone-900 rounded-lg smooth-transition cursor-pointer"
+                                    disabled={savingStickerIds.has(stickerId)}
+                                    className="p-2 min-h-[36px] min-w-[36px] flex items-center justify-center text-rose-400 hover:text-rose-300 hover:bg-stone-900 rounded-lg smooth-transition cursor-pointer disabled:opacity-50"
                                     title="Diminuir"
                                   >
                                     <Minus className="w-3.5 h-3.5" />
@@ -1819,7 +1947,8 @@ export default function App() {
                                       e.stopPropagation();
                                       adjustStickerCount(stickerId, 1);
                                     }}
-                                    className="p-2 min-h-[36px] min-w-[36px] flex items-center justify-center text-emerald-400 hover:text-emerald-300 hover:bg-stone-900 rounded-lg smooth-transition cursor-pointer"
+                                    disabled={savingStickerIds.has(stickerId)}
+                                    className="p-2 min-h-[36px] min-w-[36px] flex items-center justify-center text-emerald-400 hover:text-emerald-300 hover:bg-stone-900 rounded-lg smooth-transition cursor-pointer disabled:opacity-50"
                                     title="Aumentar"
                                   >
                                     <Plus className="w-3.5 h-3.5" />
@@ -2248,6 +2377,14 @@ export default function App() {
                         className="bg-[#6b0b0b] hover:bg-[#8f1212] border border-[#d4af37]/20 text-white px-3 py-1.5 rounded-lg text-xs font-bold uppercase smooth-transition"
                       >
                         Copiar Link
+                      </button>
+                    </div>
+                    <div className="flex justify-end">
+                      <button
+                        onClick={disableMyShare}
+                        className="text-[10px] text-rose-500 hover:text-rose-400 uppercase font-bold tracking-widest"
+                      >
+                        Desativar Código
                       </button>
                     </div>
                     <p className="text-[11px] text-stone-500">

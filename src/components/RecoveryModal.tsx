@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { motion } from "motion/react";
 import { Download, Upload, AlertCircle, Database, CheckCircle, RefreshCw, X } from "lucide-react";
 import { auth, db } from "../firebase";
-import { doc, collection, writeBatch, serverTimestamp, runTransaction } from "firebase/firestore";
+import { doc, getDoc, collection, serverTimestamp, runTransaction } from "firebase/firestore";
 import { readLocalAlbumV2, parseLegacyOwned, parseLegacyRepeated } from "../services/progressStorage";
 import { fetchFirestoreProgress } from "../services/firestoreProgress";
 import { mergeProgressSnapshots, buildRecoveryPreview, RecoveryPreview } from "../services/progressMigration";
@@ -27,6 +27,9 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
   const [migrating, setMigrating] = useState(false);
   const [success, setSuccess] = useState(false);
   const [migrationId, setMigrationId] = useState("");
+  const [manualBackupDone, setManualBackupDone] = useState(false);
+  const [mismatches, setMismatches] = useState<string[]>([]);
+  const [showInvalidIds, setShowInvalidIds] = useState(false);
 
   const analyzeSources = async () => {
     setLoading(true);
@@ -56,9 +59,21 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
   };
 
   const handleExportBackup = () => {
-    if (!sources) return;
-    const backupObj = generateBackupObject(uid, sources.firestore, sources.localV2);
+    if (!sources || !preview) return;
+    
+    // Create comprehensive backup
+    const backupObj = {
+      ...generateBackupObject(uid, sources.firestore, sources.localV2),
+      legacyOwned: sources.legacyOwned,
+      legacyRepeated: sources.legacyRepeated,
+      mergedCounts: preview.counts,
+      invalidIds: preview.invalidIds,
+      migrationPreview: preview,
+      schemaVersion: 1
+    };
+    
     exportBackup(backupObj, `album-backup-${uid.substring(0, 5)}.json`);
+    setManualBackupDone(true);
   };
 
   const handleRecover = async () => {
@@ -70,13 +85,15 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
       alert("Nada a recuperar.");
       return;
     }
+    if (!manualBackupDone) {
+      alert("Por favor, exporte o backup manualmente antes de continuar.");
+      return;
+    }
 
     setMigrating(true);
+    setMismatches([]);
     try {
-      // Create pre-migration backup automatically
-      handleExportBackup();
-
-      const mId = `mig_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const mId = migrationId || `mig_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       setMigrationId(mId);
 
       const targetStickers = Object.entries(preview.counts).filter(([id, count]) => (count as number) > 0);
@@ -110,6 +127,24 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
         });
       }
 
+      // Verification Step
+      const postRecoveryFs = await fetchFirestoreProgress(uid);
+      const errors: string[] = [];
+      targetStickers.forEach(([id, expectedCountVal]) => {
+        const expectedCount = expectedCountVal as number;
+        const actualCount = postRecoveryFs[id] || 0;
+        if (actualCount < expectedCount) {
+          errors.push(`${id} (Esperado: ${expectedCount}, Atual: ${actualCount})`);
+        }
+      });
+
+      if (errors.length > 0) {
+        setMismatches(errors);
+        alert(`Recuperação parcial. ${errors.length} figurinhas não atingiram o valor esperado. Tente novamente.`);
+        setMigrating(false);
+        return; // Halt success
+      }
+
       const logRef = doc(collection(db, "users", uid, "activity"));
       await runTransaction(db, async (tx) => {
         tx.set(logRef, {
@@ -117,6 +152,9 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
           type: "progress_recovery",
           migrationId: mId,
           schemaVersion: 1,
+          verified: true,
+          verifiedAt: serverTimestamp(),
+          mismatches: 0,
           sourceSummary: {
             firestore: Object.keys(sources!.firestore).length,
             localV2: Object.keys(sources!.localV2).length,
@@ -152,7 +190,7 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
       });
 
       setSuccess(true);
-      alert("Recuperação concluída com sucesso!");
+      alert("Recuperação verificada e concluída com sucesso!");
     } catch (error) {
       console.error(error);
       alert("Erro durante a gravação da recuperação.");
@@ -234,26 +272,51 @@ export const RecoveryModal: React.FC<RecoveryModalProps> = ({ onClose, uid }) =>
                   <span className="text-stone-400 font-bold">{preview!.docsUnchanged}</span>
                 </div>
                 <div className="flex justify-between bg-black/30 p-2 rounded col-span-2">
-                  <span className="text-stone-500">IDs Inválidos Ignorados:</span>
+                  <span className="text-stone-500 flex items-center gap-1 cursor-pointer hover:text-stone-300" onClick={() => setShowInvalidIds(!showInvalidIds)}>
+                    IDs Inválidos Ignorados: <AlertCircle className="w-3 h-3" />
+                  </span>
                   <span className="text-rose-400 font-bold">{preview!.invalidIds.length}</span>
                 </div>
               </div>
+              
+              {showInvalidIds && preview!.invalidIds.length > 0 && (
+                <div className="mt-2 bg-black/50 p-2 rounded max-h-32 overflow-y-auto text-xs text-stone-400">
+                  <ul className="space-y-1">
+                    {preview!.invalidIds.map((inv, idx) => (
+                      <li key={idx} className="flex justify-between border-b border-stone-800 pb-1">
+                        <span className="font-mono text-rose-300">{inv.id}</span>
+                        <span>Origem: {inv.source} ({String(inv.rawCount)})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
+
+            {mismatches.length > 0 && (
+              <div className="bg-rose-950/40 border border-rose-900 rounded-lg p-4 mt-2 text-rose-300 text-sm">
+                <h4 className="font-bold flex items-center gap-1 mb-2"><AlertCircle className="w-4 h-4" /> Divergências Encontradas Pós-Gravação</h4>
+                <ul className="list-disc pl-4 space-y-1 h-32 overflow-y-auto">
+                  {mismatches.map((m, idx) => <li key={idx}>{m}</li>)}
+                </ul>
+              </div>
+            )}
 
             <div className="flex gap-3 mt-6 flex-col md:flex-row">
               <button 
                 onClick={handleExportBackup}
                 className="flex-1 bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold py-3 px-4 rounded-xl border border-stone-700 transition flex items-center justify-center gap-2"
               >
-                <Download className="w-4 h-4" /> Exportar Backup JSON
+                <Download className="w-4 h-4" /> {manualBackupDone ? "Backup Salvo" : "Exportar Backup JSON"}
               </button>
 
               <button 
                 onClick={handleRecover}
-                disabled={migrating || success}
+                disabled={migrating || success || !manualBackupDone}
                 className={`flex-1 font-bold py-3 px-4 rounded-xl border transition flex items-center justify-center gap-2 ${
-                  success ? "bg-emerald-600 border-emerald-500 text-white" : "bg-[#d4af37] hover:bg-yellow-500 text-black border-[#d4af37]"
+                  success ? "bg-emerald-600 border-emerald-500 text-white" : manualBackupDone ? "bg-[#d4af37] hover:bg-yellow-500 text-black border-[#d4af37]" : "bg-stone-800 text-stone-500 border-stone-700"
                 } disabled:opacity-50`}
+                title={!manualBackupDone ? "Exporte o backup primeiro" : ""}
               >
                 {migrating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
                 {success ? "Concluído!" : "Executar Recuperação"}

@@ -28,9 +28,10 @@ export interface TradeShare {
 
 export interface ActivityLog {
   userId: string;
-  type: "stickers_added" | "milestone" | "trade";
-  description: string;
+  type: "stickers_added" | "milestone" | "trade" | "progress_recovery";
+  description?: string;
   timestamp: any; // Firebase Timestamp or ISO string;
+  [key: string]: any; // Allow arbitrary keys for specific types like recovery details
 }
 
 export interface AlbumSection {
