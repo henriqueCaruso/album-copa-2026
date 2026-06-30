@@ -1,23 +1,31 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Camera, Share2, Users, Copy, LogOut, LogIn,
   CheckCircle, Plus, Minus, Sparkles, TrendingUp, HelpCircle,
-  Search, Filter, ChevronRight, Check, AlertCircle, Upload, X
+  Search, Filter, ChevronRight, Check, AlertCircle, Upload, X, Settings
 } from "lucide-react";
 import {
   db, auth, googleProvider, signInWithPopup, signOut,
   handleFirestoreError, OperationType
 } from "./firebase";
-import { onAuthStateChanged } from "firebase/auth";
+import { onAuthStateChanged, User } from "firebase/auth";
 import {
-  doc, getDoc, setDoc, onSnapshot, collection, writeBatch, serverTimestamp
+  doc, getDoc, setDoc, onSnapshot, collection, writeBatch, serverTimestamp, runTransaction
 } from "firebase/firestore";
 import {
   countries, pagesMap, stickersMap, totalAlbumStickers, TOTAL_STICKERS, missingFromPhotos, albumSections
 } from "./data";
 import { UserProfile, UserAlbum, TradeShare, ActivityLog } from "./types";
 import { CountryFlag } from "./components/CountryFlag";
+import { RecoveryModal } from "./components/RecoveryModal";
+import {
+  LocalAlbumSnapshot, readLocalAlbumSnapshot, saveLocalAlbumSnapshot,
+  hasMeaningfulLocalProgress, getOwnedUniqueCount, getRepeatedUniqueCount,
+  getExtraCopiesCount, getTotalPhysicalCopies, getProgressPercent
+} from "./utils/albumUtils";
+
+type AuthStatus = "loading" | "guest" | "authenticated" | "error";
 
 type ScanStatus = "available" | "uploading" | "processing" | "reviewing" | "saving" | "completed" | "failed";
 
@@ -32,11 +40,12 @@ interface ReviewSticker {
 
 export default function App() {
   // Auth States
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [loadingAuth, setLoadingAuth] = useState(true);
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
   const [showMigrationPrompt, setShowMigrationPrompt] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [localSnapshot, setLocalSnapshot] = useState<LocalAlbumSnapshot | null>(null);
 
   // Active Navigation Tab
   const [activeTab, setActiveTab] = useState<"album" | "ia" | "stats" | "social">("album");
@@ -47,13 +56,8 @@ export default function App() {
   const [loadingAlbum, setLoadingAlbum] = useState(false);
 
   // Derived arrays for backward compatibility and quick checking
-  const ownedStickers = useMemo(() => {
-    return Object.keys(stickerCounts).filter((id) => stickerCounts[id] >= 1);
-  }, [stickerCounts]);
-
-  const repeatedStickers = useMemo(() => {
-    return Object.keys(stickerCounts).filter((id) => stickerCounts[id] >= 2);
-  }, [stickerCounts]);
+  const ownedStickers = useMemo(() => Object.keys(stickerCounts).filter(id => stickerCounts[id] >= 1), [stickerCounts]);
+  const repeatedStickers = useMemo(() => Object.keys(stickerCounts).filter(id => stickerCounts[id] >= 2), [stickerCounts]);
 
   // Filters and UI controls
   const [searchQuery, setSearchQuery] = useState("");
@@ -91,6 +95,9 @@ export default function App() {
 
   // Toast state
   const [toast, setToast] = useState<{ message: string; type: "success" | "warn" | "error" | "info" } | null>(null);
+  
+  // Settings/Recovery Modal
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
 
   const showToast = (message: string, type: "success" | "warn" | "error" | "info" = "success") => {
     setToast({ message, type });
@@ -106,127 +113,148 @@ export default function App() {
 
   // Sync auth state and load real-time listeners
   useEffect(() => {
+    let unsubStickers: () => void = () => {};
+    let unsubPageScans: () => void = () => {};
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
+      
+      // Cleanup previous listeners if they exist
+      unsubStickers();
+      unsubPageScans();
+
       if (currentUser) {
-        // Sync user profile
-        const userDocRef = doc(db, "users", currentUser.uid);
+        setAuthStatus("authenticated");
+        
+        // Temporarily show profile with provider data while fetching full profile
+        setProfile({
+          uid: currentUser.uid,
+          name: currentUser.displayName || "Colecionador",
+          email: currentUser.email || "",
+          photoURL: currentUser.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80",
+          createdAt: new Date().toISOString()
+        });
+
+        // 1. Capture local state safely BEFORE doing anything with Firestore
+        const currentLocalSnapshot = readLocalAlbumSnapshot();
+        
         try {
+          // Sync user profile
+          const userDocRef = doc(db, "users", currentUser.uid);
           const userSnap = await getDoc(userDocRef);
+          
           let userProfile: any;
           if (!userSnap.exists()) {
             userProfile = {
               uid: currentUser.uid,
-              name: currentUser.displayName || "Colecionador",
+              displayName: currentUser.displayName || "Colecionador",
               email: currentUser.email || "",
               photoURL: currentUser.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80",
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              migrated: false
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+              onboardingCompleted: false,
+              onboardingVersion: 2
             };
             await setDoc(userDocRef, userProfile);
           } else {
             userProfile = userSnap.data();
           }
-          setProfile(userProfile);
+          
+          // Map to typed profile
+          setProfile({
+            uid: userProfile.uid,
+            name: userProfile.displayName || userProfile.name || "Colecionador",
+            email: userProfile.email || "",
+            photoURL: userProfile.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80",
+            createdAt: userProfile.createdAt
+          });
 
-          // Real-time listener for user stickers collection
-          setLoadingAlbum(true);
-          const unsubStickers = onSnapshot(
-            collection(db, "users", currentUser.uid, "stickers"),
-            (querySnap) => {
-              const counts: Record<string, number> = {};
-              querySnap.forEach((docSnap) => {
-                const data = docSnap.data();
-                if (data.stickerId) {
-                  counts[data.stickerId] = data.ownedCount || 0;
-                }
-              });
-              setStickerCounts(counts);
-              setLoadingAlbum(false);
-            },
-            (err) => {
-              handleFirestoreError(err, OperationType.GET, `users/${currentUser.uid}/stickers`);
-              setLoadingAlbum(false);
-            }
-          );
+          // 2. Decide if we need to show Onboarding
+          // We support legacy 'migrated' field and new 'onboardingCompleted'
+          const hasCompletedOnboarding = userProfile.onboardingCompleted || userProfile.migrated;
 
-          // Real-time listener for user pageScans collection
-          const unsubPageScans = onSnapshot(
-            collection(db, "users", currentUser.uid, "pageScans"),
-            (querySnap) => {
-              const completed: string[] = [];
-              querySnap.forEach((docSnap) => {
-                const data = docSnap.data();
-                if (data.status === "completed") {
-                  completed.push(docSnap.id);
-                }
-              });
-              setCompletedPages(completed);
-            }
-          );
-
-          // Check if local storage needs migration
-          const localSavedOwned = localStorage.getItem("copa2026_owned");
-          const localSavedOwnedArray = localSavedOwned ? JSON.parse(localSavedOwned) : [];
-          if (localSavedOwnedArray.length > 0 && !userProfile.migrated) {
+          if (!hasCompletedOnboarding && hasMeaningfulLocalProgress(currentLocalSnapshot)) {
+            setLocalSnapshot(currentLocalSnapshot);
             setShowMigrationPrompt(true);
+            setLoadingAlbum(false);
+            // DO NOT start listeners yet. Wait for decision.
+          } else {
+            // Automatically complete onboarding for empty local users or already completed ones
+            if (!hasCompletedOnboarding) {
+              await setDoc(userDocRef, { onboardingCompleted: true, migrated: true }, { merge: true });
+            }
+            startRemoteListeners(currentUser.uid);
           }
 
           // Fetch user share reference
           fetchUserShare(currentUser.uid);
-          setLoadingAuth(false);
 
-          return () => {
-            unsubStickers();
-            unsubPageScans();
-          };
         } catch (error) {
           console.error("Auth sync error:", error);
-          setLoadingAuth(false);
+          setAuthStatus("error");
         }
       } else {
+        // Guest User
         setProfile(null);
         setCompletedPages([]);
-        setLoadingAuth(false);
+        setMyShareId(null);
         
-        // Load offline Guest profile from local storage
-        const savedOwned = localStorage.getItem("copa2026_owned");
-        const savedRepeated = localStorage.getItem("copa2026_repeated");
-        
-        const counts: Record<string, number> = {};
-        if (savedOwned) {
-          const ownedArr: string[] = JSON.parse(savedOwned);
-          ownedArr.forEach((id) => {
-            counts[id] = 1;
-          });
+        // 1. Read local storage snapshot
+        const snapshot = readLocalAlbumSnapshot();
+        if (snapshot && Object.keys(snapshot.counts).length > 0) {
+          setStickerCounts(snapshot.counts);
         } else {
-          // Fill from initial photo states
-          totalAlbumStickers.forEach((id) => {
-            const [prefix, numStr] = id.split("_");
-            const num = parseInt(numStr, 10);
-            const missingList = missingFromPhotos[prefix];
-            if (!missingList || !missingList.includes(num)) {
-              counts[id] = 1;
-            } else {
-              counts[id] = 0;
-            }
-          });
-          const initialOwned = Object.keys(counts).filter((id) => counts[id] >= 1);
-          localStorage.setItem("copa2026_owned", JSON.stringify(initialOwned));
+          // Initialize empty
+          setStickerCounts({});
+          saveLocalAlbumSnapshot({});
         }
-
-        if (savedRepeated) {
-          const repeatedArr: string[] = JSON.parse(savedRepeated);
-          repeatedArr.forEach((id) => {
-            counts[id] = 2;
-          });
-        }
-        setStickerCounts(counts);
+        setAuthStatus("guest");
+        setLoadingAlbum(false);
       }
     });
 
-    return () => unsubscribe();
+    const startRemoteListeners = (uid: string) => {
+      setLoadingAlbum(true);
+      unsubStickers = onSnapshot(
+        collection(db, "users", uid, "stickers"),
+        (querySnap) => {
+          const counts: Record<string, number> = {};
+          querySnap.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (data.stickerId) {
+              counts[data.stickerId] = data.ownedCount || 0;
+            }
+          });
+          setStickerCounts(counts);
+          saveLocalAlbumSnapshot(counts); // Cache locally
+          setLoadingAlbum(false);
+        },
+        (err) => {
+          handleFirestoreError(err, OperationType.GET, `users/${uid}/stickers`);
+          setLoadingAlbum(false);
+        }
+      );
+
+      unsubPageScans = onSnapshot(
+        collection(db, "users", uid, "pageScans"),
+        (querySnap) => {
+          const completed: string[] = [];
+          querySnap.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (data.status === "completed") {
+              completed.push(docSnap.id);
+            }
+          });
+          setCompletedPages(completed);
+        }
+      );
+    };
+
+    return () => {
+      unsubscribe();
+      unsubStickers();
+      unsubPageScans();
+    };
   }, []);
 
   // Check URL parameters for Shared Code on startup
@@ -268,32 +296,30 @@ export default function App() {
   };
 
   // Safe manual adjustments (Counter increase/decrease)
-  const adjustStickerCount = async (stickerId: string, delta: number) => {
-    const currentCount = stickerCounts[stickerId] || 0;
-    const nextCount = Math.max(0, currentCount + delta);
-
-    if (nextCount === currentCount) return;
+  const setStickerCount = async (stickerId: string, absoluteCount: number) => {
+    if (absoluteCount < 0 || isNaN(absoluteCount)) return;
 
     // Optimistic client-side state update
-    const nextCounts = { ...stickerCounts, [stickerId]: nextCount };
+    const nextCounts = { ...stickerCounts, [stickerId]: absoluteCount };
+    if (absoluteCount === 0) {
+      delete nextCounts[stickerId];
+    }
     setStickerCounts(nextCounts);
-
-    const nextOwned = Object.keys(nextCounts).filter((id) => nextCounts[id] >= 1);
-    const nextRepeated = Object.keys(nextCounts).filter((id) => nextCounts[id] >= 2);
-
-    localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
-    localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
+    saveLocalAlbumSnapshot(nextCounts);
 
     if (user) {
       try {
         const stickerRef = doc(db, "users", user.uid, "stickers", stickerId);
-        await setDoc(stickerRef, {
-          stickerId,
-          ownedCount: nextCount,
-          isOwned: nextCount >= 1,
-          isDuplicate: nextCount >= 2,
-          source: "manual",
-          updatedAt: serverTimestamp()
+        
+        await runTransaction(db, async (transaction) => {
+          transaction.set(stickerRef, {
+            stickerId,
+            ownedCount: absoluteCount,
+            isOwned: absoluteCount >= 1,
+            isDuplicate: absoluteCount >= 2,
+            source: "manual",
+            updatedAt: serverTimestamp()
+          }, { merge: true });
         });
       } catch (err) {
         console.error("Error saving sticker manual adjustment:", err);
@@ -301,10 +327,17 @@ export default function App() {
       }
     } else {
       showToast(
-        `Quantidade de ${stickerId.replace("_", " ")} atualizada para ${nextCount} (Salvo localmente).`,
+        `Quantidade atualizada para ${absoluteCount} (Salvo localmente).`,
         "info"
       );
     }
+  };
+
+  const adjustStickerCount = async (stickerId: string, delta: number) => {
+    const currentCount = stickerCounts[stickerId] || 0;
+    const nextCount = Math.max(0, currentCount + delta);
+    if (nextCount === currentCount) return;
+    await setStickerCount(stickerId, nextCount);
   };
 
   // Google Provider Login
@@ -321,10 +354,14 @@ export default function App() {
   const handleLogout = async () => {
     try {
       await signOut(auth);
+      setProfile(null);
       setMyShareId(null);
       setViewingFriend(false);
       setFriendAlbum(null);
       setFriendProfile(null);
+      setStickerCounts({}); // Clear private state
+      setCompletedPages([]);
+      saveLocalAlbumSnapshot({}); // Clear local storage too on explicit logout? The prompt says "limpar corretamente os dados privados no logout."
       showToast("Desconectado do Firebase.", "info");
     } catch (error) {
       showToast("Erro ao desconectar.", "error");
@@ -333,42 +370,57 @@ export default function App() {
 
   // Perform safe local storage to cloud migration
   const handleMigrate = async () => {
-    if (!user) return;
+    if (!user || !localSnapshot) return;
     setMigrating(true);
     try {
-      const batch = writeBatch(db);
+      const countsToImport = localSnapshot.counts;
+      const idsToImport = Object.keys(countsToImport).filter(id => countsToImport[id] > 0);
       
-      // Save all current local storage counts to user's stickers subcollection
-      Object.keys(stickerCounts).forEach((stickerId) => {
-        const count = stickerCounts[stickerId];
-        if (count > 0) {
-          const docRef = doc(db, "users", user.uid, "stickers", stickerId);
-          batch.set(docRef, {
-            stickerId,
-            ownedCount: count,
-            isOwned: true,
-            isDuplicate: count >= 2,
-            source: "migration",
-            updatedAt: serverTimestamp()
+      // We will perform the updates sequentially in small batches due to the read-modify-write need
+      for (let i = 0; i < idsToImport.length; i += 200) {
+        const chunk = idsToImport.slice(i, i + 200);
+        
+        await runTransaction(db, async (transaction) => {
+          // Read all docs in this chunk
+          const docRefs = chunk.map(id => doc(db, "users", user.uid, "stickers", id));
+          
+          // Execute reads sequentially within the transaction (or get them if possible)
+          const reads = await Promise.all(docRefs.map(ref => transaction.get(ref)));
+          
+          reads.forEach((docSnap, index) => {
+            const stickerId = chunk[index];
+            const localCount = countsToImport[stickerId];
+            
+            let finalCount = localCount;
+            if (docSnap.exists()) {
+              const remoteCount = docSnap.data().ownedCount || 0;
+              finalCount = Math.max(localCount, remoteCount);
+            }
+            
+            transaction.set(docRefs[index], {
+              stickerId,
+              ownedCount: finalCount,
+              isOwned: finalCount >= 1,
+              isDuplicate: finalCount >= 2,
+              source: "migration",
+              updatedAt: serverTimestamp()
+            }, { merge: true });
           });
-        }
-      });
+        });
+      }
 
       // Update user profile migration status
       const userDocRef = doc(db, "users", user.uid);
-      batch.set(userDocRef, { migrated: true }, { merge: true });
+      await setDoc(userDocRef, { onboardingCompleted: true, migrated: true }, { merge: true });
 
-      await batch.commit();
-
-      if (profile) {
-        setProfile({ ...profile, migrated: true } as any);
-      }
       setShowMigrationPrompt(false);
-      showToast("Seu progresso local foi importado com sucesso para a sua conta!", "success");
+      showToast("Seu progresso local foi mesclado com sucesso para a sua conta!", "success");
+      
+      // Reload page to start listeners correctly
+      window.location.reload();
     } catch (err) {
       console.error("Migration error:", err);
       showToast("Erro ao importar dados locais para a nuvem.", "error");
-    } finally {
       setMigrating(false);
     }
   };
@@ -376,14 +428,17 @@ export default function App() {
   const handleIgnoreMigration = async () => {
     if (!user) return;
     try {
-      // Mark as migrated to prevent asking again
       const userDocRef = doc(db, "users", user.uid);
-      await setDoc(userDocRef, { migrated: true }, { merge: true });
-      if (profile) {
-        setProfile({ ...profile, migrated: true } as any);
-      }
+      await setDoc(userDocRef, { onboardingCompleted: true, migrated: true }, { merge: true });
       setShowMigrationPrompt(false);
-      showToast("Importação ignorada. Você começou com seu álbum em nuvem vazio.", "info");
+      showToast("Você começou com seu álbum em nuvem vazio.", "info");
+      
+      // Reset local state
+      setStickerCounts({});
+      saveLocalAlbumSnapshot({});
+
+      // Reload page to start listeners
+      window.location.reload();
     } catch (e) {
       console.error(e);
     }
@@ -672,25 +727,39 @@ export default function App() {
 
   // Social Sharing Link Generator
   const generateMyShareLink = async () => {
-    if (!user) {
+    if (!user || !profile) {
       showToast("Faça login com Google para compartilhar online.", "warn");
       return;
     }
 
     setGeneratingShare(true);
-    const newShareId = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const newShareId = myShareId || Math.random().toString(36).substring(2, 10).toUpperCase();
 
     try {
+      const missingStickerIds = totalAlbumStickers.filter((id) => (stickerCounts[id] || 0) === 0);
+      const repeatedCounts: Record<string, number> = {};
+      
+      Object.keys(stickerCounts).forEach(id => {
+        if (stickerCounts[id] > 1) {
+          repeatedCounts[id] = stickerCounts[id] - 1; // Number of *extra* copies
+        }
+      });
+
       const shareDoc: TradeShare = {
         shareId: newShareId,
-        userId: user.uid,
+        ownerUid: user.uid,
+        displayName: profile.name,
+        photoURL: profile.photoURL,
+        missingStickerIds,
+        repeatedCounts,
+        updatedAt: serverTimestamp(),
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         isPublic: true
       };
 
       await setDoc(doc(db, "trade_shares", newShareId), shareDoc);
       setMyShareId(newShareId);
-      showToast("Link de trocas ativo por 30 dias!", "success");
+      showToast("Link de trocas atualizado e ativo por 30 dias!", "success");
     } catch (e) {
       console.error(e);
       showToast("Falha ao criar link de compartilhamento.", "error");
@@ -713,49 +782,24 @@ export default function App() {
       }
 
       const shareData = shareSnap.data() as TradeShare;
-      const friendUid = shareData.userId;
+      
+      setFriendProfile({
+        uid: shareData.ownerUid,
+        name: shareData.displayName,
+        email: "",
+        photoURL: shareData.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80",
+        createdAt: shareData.updatedAt
+      });
 
-      // Fetch Friend Profile
-      const friendProfileSnap = await getDoc(doc(db, "users", friendUid));
-      if (friendProfileSnap.exists()) {
-        setFriendProfile(friendProfileSnap.data() as UserProfile);
-      }
-
-      // Fetch Friend Stickers to compute their album
-      const friendStickersSnap = await getDoc(doc(db, "albums", friendUid));
-      let friendOwned: string[] = [];
-      let friendRepeated: string[] = [];
-
-      // Check subcollection
-      const subSnap = await getDoc(doc(db, "users", friendUid));
-      if (subSnap.exists()) {
-        // Fetch subcollection in trade system
-        // Due to safety reading rules, let's query the subcollection directly
-        // We will make a safe call
-        // Let's implement getting friend's counts
-        try {
-          const friendStickersColl = await getDoc(doc(db, "albums", friendUid)); // Fallback
-        } catch (e) {}
-      }
-
-      // We load the albums snapshot for the friend
-      const albumSnap = await getDoc(doc(db, "albums", friendUid));
-      if (albumSnap.exists()) {
-        const data = albumSnap.data() as UserAlbum;
-        friendOwned = data.ownedStickers || [];
-        friendRepeated = data.repeatedStickers || [];
-      } else {
-        // Also look up under trade_shares if legacy, or we'll fetch friend's stickers if rule allows
-        // Let's fetch friend's album progress
-        friendOwned = [];
-        friendRepeated = [];
-      }
+      const friendMissing = shareData.missingStickerIds || [];
+      const friendOwned = totalAlbumStickers.filter(id => !friendMissing.includes(id));
+      const friendRepeated = Object.keys(shareData.repeatedCounts || {});
 
       setFriendAlbum({
-        userId: friendUid,
+        userId: shareData.ownerUid,
         ownedStickers: friendOwned,
         repeatedStickers: friendRepeated,
-        lastUpdated: new Date().toISOString(),
+        lastUpdated: shareData.updatedAt,
         progressPercent: Math.round((friendOwned.length / TOTAL_STICKERS) * 100)
       });
       setViewingFriend(true);
@@ -896,31 +940,33 @@ export default function App() {
         const missingList = missingFromPhotos[prefix];
         if (!missingList || !missingList.includes(num)) {
           counts[id] = 1;
-        } else {
-          counts[id] = 0;
         }
       });
 
       setStickerCounts(counts);
-
-      const nextOwned = Object.keys(counts).filter((id) => counts[id] >= 1);
-      localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
-      localStorage.setItem("copa2026_repeated", JSON.stringify([]));
+      saveLocalAlbumSnapshot(counts);
 
       if (user) {
-        const batch = writeBatch(db);
-        totalAlbumStickers.forEach((id) => {
-          const ref = doc(db, "users", user.uid, "stickers", id);
-          batch.set(ref, {
-            stickerId: id,
-            ownedCount: counts[id],
-            isOwned: counts[id] >= 1,
-            isDuplicate: false,
-            source: "manual",
-            updatedAt: serverTimestamp()
-          });
-        });
-        batch.commit();
+        const updateChunks = async () => {
+          const ids = Object.keys(counts);
+          for (let i = 0; i < ids.length; i += 450) {
+            const chunk = ids.slice(i, i + 450);
+            const batch = writeBatch(db);
+            chunk.forEach((id) => {
+              const ref = doc(db, "users", user.uid, "stickers", id);
+              batch.set(ref, {
+                stickerId: id,
+                ownedCount: counts[id],
+                isOwned: true,
+                isDuplicate: false,
+                source: "reset",
+                updatedAt: serverTimestamp()
+              });
+            });
+            await batch.commit();
+          }
+        };
+        updateChunks().catch(console.error);
       }
       showToast("Álbum restaurado para as fotos originais!", "info");
     }
@@ -929,23 +975,23 @@ export default function App() {
   const clearProgressTotal = () => {
     if (confirm("🚨 ATENÇÃO: Deseja zerar totalmente seu álbum? Todas as figurinhas constarão como faltantes.")) {
       setStickerCounts({});
-      localStorage.setItem("copa2026_owned", JSON.stringify([]));
-      localStorage.setItem("copa2026_repeated", JSON.stringify([]));
+      saveLocalAlbumSnapshot({});
 
       if (user) {
-        const batch = writeBatch(db);
-        totalAlbumStickers.forEach((id) => {
-          const ref = doc(db, "users", user.uid, "stickers", id);
-          batch.set(ref, {
-            stickerId: id,
-            ownedCount: 0,
-            isOwned: false,
-            isDuplicate: false,
-            source: "manual",
-            updatedAt: serverTimestamp()
-          });
-        });
-        batch.commit();
+        const updateChunks = async () => {
+          // Firebase batch limit is 500, we delete in chunks.
+          const owned = Object.keys(stickerCounts);
+          for (let i = 0; i < owned.length; i += 450) {
+            const chunk = owned.slice(i, i + 450);
+            const batch = writeBatch(db);
+            chunk.forEach(id => {
+              const ref = doc(db, "users", user.uid, "stickers", id);
+              batch.delete(ref);
+            });
+            await batch.commit();
+          }
+        };
+        updateChunks().catch(console.error);
       }
       showToast("Seu álbum foi totalmente zerado.", "warn");
     }
@@ -1002,30 +1048,96 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Migration Notice Banner */}
-      {showMigrationPrompt && user && (
-        <div className="bg-[#6b0b0b] border-b border-[#d4af37]/30 py-3.5 px-4 text-center text-sm font-bold text-stone-100 relative z-40 flex flex-col sm:flex-row items-center justify-center gap-3 shadow-md animate-fade-in">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-[#d4af37]" />
-            <span>Encontramos progresso salvo neste navegador. Deseja importar e sincronizar com sua conta?</span>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={handleMigrate}
-              disabled={migrating}
-              className="bg-[#d4af37] text-stone-950 px-4 py-1.5 rounded-lg text-xs font-black uppercase hover:bg-white transition disabled:opacity-55"
+      {/* High-Fidelity Onboarding Modal */}
+      <AnimatePresence>
+        {showMigrationPrompt && user && localSnapshot && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl space-y-6 relative overflow-hidden"
             >
-              {migrating ? "Importando..." : "Importar"}
-            </button>
-            <button
-              onClick={handleIgnoreMigration}
-              disabled={migrating}
-              className="bg-stone-900/60 text-stone-300 border border-stone-700 px-3 py-1.5 rounded-lg text-xs font-black uppercase hover:bg-stone-900 transition"
-            >
-              Ignorar
-            </button>
-          </div>
-        </div>
+              <div className="absolute inset-0 bg-opacity-5 bg-[radial-gradient(#ffffff_1px,transparent_1px)] [background-size:16px_16px] pointer-events-none" />
+              
+              <div className="relative z-10 space-y-2 text-center">
+                <div className="w-12 h-12 bg-[#6b0b0b] rounded-full flex items-center justify-center border border-[#d4af37]/30 shadow-md mx-auto mb-4">
+                  <Sparkles className="w-6 h-6 text-[#d4af37]" />
+                </div>
+                <h2 className="text-xl md:text-2xl font-black text-stone-100 uppercase tracking-tight">Como deseja iniciar seu álbum?</h2>
+                <p className="text-sm text-stone-400">Encontramos figurinhas salvas neste navegador. Escolha o que fazer com elas.</p>
+              </div>
+
+              <div className="space-y-4 relative z-10">
+                <button
+                  onClick={handleMigrate}
+                  disabled={migrating}
+                  className="w-full bg-stone-900 border border-emerald-500/30 hover:border-emerald-500/60 p-4 rounded-xl text-left transition disabled:opacity-50 group"
+                >
+                  <h3 className="text-emerald-400 font-bold uppercase tracking-wider text-sm flex items-center justify-between">
+                    Usar meu progresso atual
+                    <ChevronRight className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </h3>
+                  <p className="text-xs text-stone-400 mt-1 mb-3">Importar as figurinhas que já estão marcadas neste navegador para a sua conta.</p>
+                  
+                  <div className="grid grid-cols-4 gap-2 text-center bg-stone-950 p-2 rounded-lg border border-stone-800">
+                    <div>
+                      <span className="block text-emerald-400 font-bold">{getOwnedUniqueCount(localSnapshot.counts)}</span>
+                      <span className="block text-[9px] uppercase text-stone-500">Únicas</span>
+                    </div>
+                    <div>
+                      <span className="block text-amber-400 font-bold">{getExtraCopiesCount(localSnapshot.counts)}</span>
+                      <span className="block text-[9px] uppercase text-stone-500">Extras</span>
+                    </div>
+                    <div>
+                      <span className="block text-rose-400 font-bold">{TOTAL_STICKERS - getOwnedUniqueCount(localSnapshot.counts)}</span>
+                      <span className="block text-[9px] uppercase text-stone-500">Faltam</span>
+                    </div>
+                    <div>
+                      <span className="block text-[#d4af37] font-bold">{getProgressPercent(localSnapshot.counts)}%</span>
+                      <span className="block text-[9px] uppercase text-stone-500">Total</span>
+                    </div>
+                  </div>
+                </button>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-stone-800"></div>
+                  </div>
+                  <div className="relative flex justify-center text-[10px] uppercase font-bold text-stone-600 tracking-widest">
+                    <span className="bg-[#1a0505] px-2">ou</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    if (window.confirm("O progresso atual continuará salvo neste navegador para usuários offline, mas não será importado para esta conta. Tem certeza que deseja iniciar um álbum vazio na nuvem?")) {
+                      handleIgnoreMigration();
+                    }
+                  }}
+                  disabled={migrating}
+                  className="w-full bg-stone-900 border border-stone-800 hover:border-stone-600 p-4 rounded-xl text-left transition disabled:opacity-50 group"
+                >
+                  <h3 className="text-stone-300 font-bold uppercase tracking-wider text-sm flex items-center justify-between">
+                    Começar do Zero
+                    <ChevronRight className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  </h3>
+                  <p className="text-xs text-stone-500 mt-1">Criar um álbum vazio nesta conta. O progresso local continuará salvo offline.</p>
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Settings / Recovery Modal */}
+      {showRecoveryModal && user && (
+        <RecoveryModal onClose={() => setShowRecoveryModal(false)} uid={user.uid} />
       )}
 
       {/* Header Panel */}
@@ -1099,6 +1211,13 @@ export default function App() {
                   <p className="text-xs font-bold leading-none text-stone-200">{profile.name}</p>
                   <p className="text-[10px] text-stone-500 uppercase font-bold tracking-tighter mt-0.5">Colecionador</p>
                 </div>
+                <button
+                  onClick={() => setShowRecoveryModal(true)}
+                  className="p-1.5 hover:bg-white/10 rounded-full text-stone-400 hover:text-stone-200 smooth-transition min-h-[36px] min-w-[36px] flex items-center justify-center"
+                  title="Configurações e Recuperação"
+                >
+                  <Settings className="w-4 h-4" />
+                </button>
                 <button
                   onClick={handleLogout}
                   className="p-1.5 hover:bg-white/10 rounded-full text-stone-400 hover:text-rose-400 smooth-transition min-h-[36px] min-w-[36px] flex items-center justify-center"

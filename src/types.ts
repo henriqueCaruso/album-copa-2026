@@ -16,7 +16,12 @@ export interface UserAlbum {
 
 export interface TradeShare {
   shareId: string;
-  userId: string;
+  ownerUid: string;
+  displayName: string;
+  photoURL?: string;
+  missingStickerIds: string[];
+  repeatedCounts: Record<string, number>;
+  updatedAt: any; // Firebase Timestamp or ISO string
   expiresAt: any; // Firebase Timestamp or ISO string
   isPublic: boolean;
 }

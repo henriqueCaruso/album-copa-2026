@@ -4,8 +4,17 @@ import multer from "multer";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
+import { initializeApp, getApps } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 
 dotenv.config();
+
+// Initialize Firebase Admin SDK for token verification
+// This relies on Google Application Default Credentials in Cloud Run.
+// Ensure the Cloud Run service account has proper permissions.
+if (getApps().length === 0) {
+  initializeApp();
+}
 
 const app = express();
 const PORT = 3000;
@@ -48,8 +57,27 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Middleware to verify Firebase ID token
+const verifyFirebaseToken = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.status(401).json({ error: "Unauthorized: Missing or invalid Authorization header" });
+    return;
+  }
+
+  const idToken = authHeader.split("Bearer ")[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    (req as any).user = decodedToken;
+    next();
+  } catch (error) {
+    console.error("Token verification error:", error);
+    res.status(401).json({ error: "Unauthorized: Invalid token" });
+  }
+};
+
 // Gemini Vision processing endpoint
-app.post("/api/gemini/analyze", upload.single("image"), async (req, res) => {
+app.post("/api/gemini/analyze", verifyFirebaseToken, upload.single("image"), async (req, res) => {
   try {
     const file = req.file;
     const pageId = req.body.pageId || "BRA-PAGE-01";

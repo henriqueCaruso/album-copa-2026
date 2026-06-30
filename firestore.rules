@@ -81,48 +81,53 @@ service cloud.firestore {
 
     // Match definitions
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isOwner(userId) && isValidId(userId);
-      allow create: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidUser(incoming());
-      allow update: if isOwner(userId) && isValidId(userId) && isVerifiedUser();
-      allow delete: if isOwner(userId) && isValidId(userId);
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId) && isVerifiedUser();
+      allow update: if isOwner(userId) && isVerifiedUser();
+      allow delete: if isOwner(userId);
 
-      // Subcollection for stickers (only the owner can write, other logged-in users can read to perform trading matchups)
+      // Subcollection for stickers (only the owner can read and write)
       match /stickers/{stickerId} {
-        allow read: if isSignedIn() && isValidId(userId) && isValidId(stickerId);
-        allow write: if isOwner(userId) && isValidId(userId) && isValidId(stickerId);
+        allow read: if isOwner(userId) && isValidId(stickerId);
+        allow write: if isOwner(userId) && isValidId(stickerId)
+          && incoming().ownedCount is int
+          && incoming().ownedCount >= 0
+          && incoming().stickerId == stickerId;
       }
 
       // Subcollection for pageScans (only the owner can write/read page completion status)
       match /pageScans/{pageId} {
-        allow read: if isSignedIn() && isValidId(userId) && isValidId(pageId);
-        allow write: if isOwner(userId) && isValidId(userId) && isValidId(pageId);
+        allow read: if isOwner(userId) && isValidId(pageId);
+        allow create: if isOwner(userId) && isValidId(pageId);
+        allow update: if isOwner(userId) && isValidId(pageId)
+          && (existing().status != "completed" || incoming().status == "completed");
+        allow delete: if false;
+      }
+
+      match /settings/{docId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /friends/{docId} {
+        allow read, write: if isOwner(userId);
       }
 
       // Subcollection for user activity logs
       match /activity/{activityId} {
-        allow read: if isOwner(userId) && isValidId(userId) && isValidId(activityId);
-        allow write: if isOwner(userId) && isValidId(userId) && isValidId(activityId);
+        allow read: if isOwner(userId) && isValidId(activityId);
+        allow write: if isOwner(userId) && isValidId(activityId);
       }
     }
 
-    match /albums/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isOwner(userId) && isValidId(userId);
-      allow create: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidAlbum(incoming());
-      allow update: if isOwner(userId) && isValidId(userId) && isVerifiedUser() && isValidAlbum(incoming())
-                       && incoming().userId == existing().userId;
-      allow delete: if isOwner(userId) && isValidId(userId);
-    }
-
     match /trade_shares/{shareId} {
-      allow get: if isSignedIn() && isValidId(shareId);
-      allow list: if isSignedIn() && resource.data.userId == request.auth.uid && isValidId(shareId);
-      allow create: if isSignedIn() && incoming().userId == request.auth.uid && isVerifiedUser() && isValidId(shareId) && isValidTradeShare(incoming());
-      allow update: if isSignedIn() && existing().userId == request.auth.uid && incoming().userId == request.auth.uid && isVerifiedUser() && isValidId(shareId) && isValidTradeShare(incoming())
-                       && incoming().shareId == existing().shareId
-                       && incoming().userId == existing().userId;
-      allow delete: if isSignedIn() && existing().userId == request.auth.uid && isValidId(shareId);
+      allow read: if isSignedIn() && (
+        resource.data.ownerUid == request.auth.uid || 
+        (resource.data.isPublic == true && resource.data.expiresAt > request.time)
+      );
+      allow create: if isSignedIn() && incoming().ownerUid == request.auth.uid && isVerifiedUser() && isValidId(shareId);
+      allow update: if isSignedIn() && existing().ownerUid == request.auth.uid && incoming().ownerUid == request.auth.uid && isVerifiedUser() && isValidId(shareId);
+      allow delete: if isSignedIn() && existing().ownerUid == request.auth.uid && isValidId(shareId);
     }
 
     match /activity_logs/{logId} {
