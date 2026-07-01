@@ -10,6 +10,7 @@ export interface UserAlbum {
   userId: string;
   ownedStickers: string[];
   repeatedStickers: string[];
+  repeatedCounts?: Record<string, number>;
   lastUpdated: any; // Firebase Timestamp or ISO string
   progressPercent: number;
 }

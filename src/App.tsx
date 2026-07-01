@@ -19,6 +19,10 @@ import {
 import { UserProfile, UserAlbum, TradeShare, ActivityLog } from "./types";
 import { CountryFlag } from "./components/CountryFlag";
 import { RecoveryModal } from "./components/RecoveryModal";
+import { SettingsModal } from "./components/SettingsModal";
+import { QuickAddModal } from "./components/QuickAddModal";
+import { QuantityModal } from "./components/QuantityModal";
+import { ExportModal, ImportModal } from "./components/ImportExportModals";
 import {
   LocalAlbumSnapshot, readLocalAlbumSnapshot, saveLocalAlbumSnapshot,
   hasMeaningfulLocalProgress, getOwnedUniqueCount, getRepeatedUniqueCount,
@@ -82,6 +86,7 @@ export default function App() {
   const [friendProfile, setFriendProfile] = useState<UserProfile | null>(null);
   const [friendAlbum, setFriendAlbum] = useState<UserAlbum | null>(null);
   const [loadingFriend, setLoadingFriend] = useState(false);
+  const [savedFriends, setSavedFriends] = useState<{shareId: string; nickname?: string; displayName: string; photoURL: string; lastViewedAt: any}[]>([]);
 
   // IA Vision states
   const [selectedPageId, setSelectedPageId] = useState("BRA-PAGE-01");
@@ -99,6 +104,11 @@ export default function App() {
   
   // Settings/Recovery Modal
   const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showQuickAddModal, setShowQuickAddModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [quantityTarget, setQuantityTarget] = useState<{ id: string, count: number } | null>(null);
 
   const showToast = (message: string, type: "success" | "warn" | "error" | "info" = "success") => {
     setToast({ message, type });
@@ -214,6 +224,8 @@ export default function App() {
       }
     });
 
+    let unsubFriends: () => void = () => {};
+
     const startRemoteListeners = (uid: string) => {
       setLoadingAlbum(true);
       unsubStickers = onSnapshot(
@@ -249,14 +261,63 @@ export default function App() {
           setCompletedPages(completed);
         }
       );
+
+      unsubFriends = onSnapshot(
+        collection(db, "users", uid, "friends"),
+        (querySnap) => {
+          const friends: any[] = [];
+          querySnap.forEach((docSnap) => {
+            friends.push({ shareId: docSnap.id, ...docSnap.data() });
+          });
+          friends.sort((a, b) => (b.lastViewedAt?.toMillis() || 0) - (a.lastViewedAt?.toMillis() || 0));
+          setSavedFriends(friends);
+        }
+      );
     };
 
     return () => {
       unsubscribe();
       unsubStickers();
       unsubPageScans();
+      unsubFriends();
     };
   }, []);
+
+  const saveFriendContact = async () => {
+    if (!user || !friendProfile || !friendShareId) return;
+    try {
+      const friendRef = doc(db, "users", user.uid, "friends", friendShareId.trim().toUpperCase());
+      await setDoc(friendRef, {
+        displayName: friendProfile.name,
+        photoURL: friendProfile.photoURL,
+        addedAt: serverTimestamp(),
+        lastViewedAt: serverTimestamp()
+      }, { merge: true });
+      showToast("Contato salvo com sucesso!", "success");
+    } catch (e) {
+      console.error(e);
+      showToast("Erro ao salvar contato.", "error");
+    }
+  };
+
+  const removeFriendContact = async (shareId: string) => {
+    if (!user) return;
+    try {
+      await runTransaction(db, async (transaction) => {
+         transaction.delete(doc(db, "users", user.uid, "friends", shareId));
+      });
+      showToast("Contato removido.", "info");
+      if (friendShareId === shareId) {
+        setViewingFriend(false);
+        setFriendProfile(null);
+        setFriendAlbum(null);
+        setFriendShareId("");
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("Erro ao remover contato.", "error");
+    }
+  };
 
   // Check URL parameters for Shared Code on startup
   useEffect(() => {
@@ -870,7 +931,9 @@ export default function App() {
       }, { merge: true });
       
       setMyShareId(newShareId);
-      showToast("Link de trocas atualizado e ativo por 30 dias!", "success");
+      const url = `${window.location.origin}${window.location.pathname}?share=${newShareId}`;
+      navigator.clipboard.writeText(url);
+      showToast("Link gerado e copiado para a área de transferência!", "success");
     } catch (e) {
       console.error(e);
       showToast("Falha ao criar link de compartilhamento.", "error");
@@ -926,12 +989,23 @@ export default function App() {
         userId: shareData.ownerUid,
         ownedStickers: friendOwned,
         repeatedStickers: friendRepeated,
+        repeatedCounts: shareData.repeatedCounts || {},
         lastUpdated: shareData.updatedAt,
         progressPercent: Math.round((friendOwned.length / TOTAL_STICKERS) * 100)
       });
       setViewingFriend(true);
       setActiveTab("social");
       showToast("Lista do amigo carregada lado a lado!", "success");
+      
+      // Update lastViewedAt if saved friend
+      if (user) {
+         const friendRef = doc(db, "users", user.uid, "friends", shareIdToLoad.trim().toUpperCase());
+         getDoc(friendRef).then(snap => {
+            if (snap.exists()) {
+               setDoc(friendRef, { lastViewedAt: serverTimestamp() }, { merge: true });
+            }
+         });
+      }
     } catch (err) {
       console.error(err);
       showToast("Erro ao carregar lista do amigo.", "error");
@@ -956,11 +1030,18 @@ export default function App() {
     const myMissing = totalAlbumStickers.filter((id) => !ownedStickers.includes(id));
     const friendMissing = totalAlbumStickers.filter((id) => !friendAlbum.ownedStickers.includes(id));
 
-    const canGive = repeatedStickers.filter((id) => friendMissing.includes(id));
-    const canGet = friendAlbum.repeatedStickers.filter((id) => myMissing.includes(id));
+    const canGive = repeatedStickers.filter((id) => friendMissing.includes(id)).map(id => ({
+      id,
+      extraQuantity: (stickerCounts[id] || 0) - 1
+    }));
+    
+    const canGet = friendAlbum.repeatedStickers.filter((id) => myMissing.includes(id)).map(id => ({
+      id,
+      extraQuantity: (friendAlbum.repeatedCounts?.[id] || 0) - 1
+    }));
 
     return { canGive, canGet };
-  }, [viewingFriend, friendAlbum, ownedStickers, repeatedStickers]);
+  }, [viewingFriend, friendAlbum, ownedStickers, repeatedStickers, stickerCounts]);
 
   // Insights
   const statsInsights = useMemo(() => {
@@ -1012,115 +1093,112 @@ export default function App() {
     return { bestTeam, bestGroup, rank };
   }, [stickerCounts, globalProgressPercent]);
 
-  // Export / Backup State (Client Side)
-  const exportStateCode = () => {
-    const backupObj = { counts: stickerCounts };
-    const token = btoa(unescape(encodeURIComponent(JSON.stringify(backupObj))));
-    navigator.clipboard.writeText(token);
-    showToast("Código de backup copiado!", "success");
-  };
+  const handleQuickAdd = async (updates: { id: string; extraCopies: number }[]) => {
+    if (updates.length === 0) return;
+    
+    if (!user) {
+      setStickerCounts((prev) => {
+        const next = { ...prev };
+        updates.forEach(upd => {
+          const current = next[upd.id] || 0;
+          next[upd.id] = Math.max(1, current) + upd.extraCopies;
+        });
+        saveLocalAlbumSnapshot(next);
+        return next;
+      });
+      showToast(`${updates.length} códigos atualizados localmente.`, "success");
+      return;
+    }
 
-  const importStateCode = () => {
-    const token = prompt("Insira o seu Código de Backup:");
-    if (!token) return;
     try {
-      const parsed = JSON.parse(decodeURIComponent(escape(atob(token))));
-      if (parsed && parsed.counts) {
-        setStickerCounts(parsed.counts);
-        
-        const nextOwned = Object.keys(parsed.counts).filter((id) => parsed.counts[id] >= 1);
-        const nextRepeated = Object.keys(parsed.counts).filter((id) => parsed.counts[id] >= 2);
-        localStorage.setItem("copa2026_owned", JSON.stringify(nextOwned));
-        localStorage.setItem("copa2026_repeated", JSON.stringify(nextRepeated));
-
-        if (user) {
-          const batch = writeBatch(db);
-          Object.keys(parsed.counts).forEach((sid) => {
-            const count = parsed.counts[sid];
-            const ref = doc(db, "users", user.uid, "stickers", sid);
-            batch.set(ref, {
-              stickerId: sid,
-              ownedCount: count,
-              isOwned: count >= 1,
-              isDuplicate: count >= 2,
-              source: "manual",
-              updatedAt: serverTimestamp()
-            });
-          });
-          batch.commit();
-        }
-        showToast("Backup importado e sincronizado com sucesso!", "success");
-      } else {
-        showToast("Backup inválido ou corrompido.", "error");
-      }
+      await runTransaction(db, async (transaction) => {
+        const reads = await Promise.all(updates.map(u => transaction.get(doc(db, "users", user.uid, "stickers", u.id))));
+        reads.forEach((docSnap, index) => {
+          const upd = updates[index];
+          const remoteCount = docSnap.exists() ? (docSnap.data().ownedCount || 0) : 0;
+          const finalCount = Math.max(1, remoteCount) + upd.extraCopies;
+          
+          transaction.set(docSnap.ref, {
+            stickerId: upd.id,
+            ownedCount: finalCount,
+            isOwned: true,
+            isDuplicate: finalCount >= 2,
+            source: "duplicate_quick_add",
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+        });
+      });
+      showToast(`${updates.length} códigos atualizados na nuvem!`, "success");
     } catch (e) {
-      showToast("Formato de código inválido.", "error");
+      console.error(e);
+      showToast("Erro ao salvar repetidas em lote.", "error");
     }
   };
 
-  const resetToPhotos = () => {
-    if (confirm("Deseja redefinir o álbum para as figurinhas detectadas inicialmente nas fotos?")) {
-      const counts: Record<string, number> = {};
-      totalAlbumStickers.forEach((id) => {
-        const [prefix, numStr] = id.split("_");
-        const num = parseInt(numStr, 10);
-        const missingList = missingFromPhotos[prefix];
-        if (!missingList || !missingList.includes(num)) {
-          counts[id] = 1;
+  const handleImportJSON = async (parsedCounts: Record<string, number>, mode: "merge" | "replace") => {
+    if (!user) {
+      setStickerCounts((prev) => {
+        const next = mode === "replace" ? { ...parsedCounts } : { ...prev };
+        if (mode === "merge") {
+          Object.keys(parsedCounts).forEach(id => {
+            next[id] = Math.max(next[id] || 0, parsedCounts[id] || 0);
+          });
         }
+        saveLocalAlbumSnapshot(next);
+        return next;
       });
+      showToast("Importado localmente.", "success");
+      return;
+    }
 
-      setStickerCounts(counts);
-      saveLocalAlbumSnapshot(counts);
-
-      if (user) {
-        const updateChunks = async () => {
-          const ids = Object.keys(counts);
-          for (let i = 0; i < ids.length; i += 450) {
-            const chunk = ids.slice(i, i + 450);
-            const batch = writeBatch(db);
-            chunk.forEach((id) => {
-              const ref = doc(db, "users", user.uid, "stickers", id);
-              batch.set(ref, {
+    const ids = mode === "replace" ? totalAlbumStickers : Object.keys(parsedCounts);
+    
+    try {
+      // Chunk it for safety
+      for (let i = 0; i < ids.length; i += 400) {
+        const chunk = ids.slice(i, i + 400);
+        await runTransaction(db, async (transaction) => {
+          const refs = chunk.map(id => doc(db, "users", user.uid, "stickers", id));
+          const reads = mode === "merge" ? await Promise.all(refs.map(r => transaction.get(r))) : [];
+          
+          refs.forEach((ref, index) => {
+            const id = chunk[index];
+            const importCount = parsedCounts[id] || 0;
+            let finalCount = importCount;
+            
+            if (mode === "merge") {
+               const docSnap = reads[index];
+               const remoteCount = docSnap.exists() ? (docSnap.data().ownedCount || 0) : 0;
+               finalCount = Math.max(remoteCount, importCount);
+            }
+            
+            if (finalCount > 0) {
+              transaction.set(ref, {
                 stickerId: id,
-                ownedCount: counts[id],
-                isOwned: true,
-                isDuplicate: false,
-                source: "reset",
+                ownedCount: finalCount,
+                isOwned: finalCount >= 1,
+                isDuplicate: finalCount >= 2,
+                source: "import",
                 updatedAt: serverTimestamp()
-              });
-            });
-            await batch.commit();
-          }
-        };
-        updateChunks().catch(console.error);
+              }, { merge: true });
+            } else if (mode === "replace") {
+              transaction.delete(ref);
+            }
+          });
+        });
       }
-      showToast("Álbum restaurado para as fotos originais!", "info");
+      showToast("Álbum importado com sucesso na nuvem!", "success");
+    } catch (e) {
+      console.error(e);
+      showToast("Erro durante a importação.", "error");
     }
   };
 
   const clearProgressTotal = () => {
-    if (confirm("🚨 ATENÇÃO: Deseja zerar totalmente seu álbum? Todas as figurinhas constarão como faltantes.")) {
-      setStickerCounts({});
+    if (confirm("🚨 ATENÇÃO: Apagar os dados locais do álbum deste navegador? (Os dados em nuvem, se logado, NÃO serão afetados).")) {
       saveLocalAlbumSnapshot({});
-
-      if (user) {
-        const updateChunks = async () => {
-          // Firebase batch limit is 500, we delete in chunks.
-          const owned = Object.keys(stickerCounts);
-          for (let i = 0; i < owned.length; i += 450) {
-            const chunk = owned.slice(i, i + 450);
-            const batch = writeBatch(db);
-            chunk.forEach(id => {
-              const ref = doc(db, "users", user.uid, "stickers", id);
-              batch.delete(ref);
-            });
-            await batch.commit();
-          }
-        };
-        updateChunks().catch(console.error);
-      }
-      showToast("Seu álbum foi totalmente zerado.", "warn");
+      if (!user) setStickerCounts({});
+      showToast("Progresso local apagado.", "warn");
     }
   };
 
@@ -1266,6 +1344,54 @@ export default function App() {
       {showRecoveryModal && user && (
         <RecoveryModal onClose={() => setShowRecoveryModal(false)} uid={user.uid} />
       )}
+      
+      {showSettingsModal && (
+        <SettingsModal 
+          onClose={() => setShowSettingsModal(false)}
+          onOpenRecovery={() => setShowRecoveryModal(true)}
+          onOpenQuickAdd={() => setShowQuickAddModal(true)}
+          onOpenExport={() => setShowExportModal(true)}
+          onOpenImport={() => setShowImportModal(true)}
+          onClearLocal={clearProgressTotal}
+          onLogout={handleLogout}
+          isAuthenticated={!!user}
+        />
+      )}
+      
+      {showQuickAddModal && (
+        <QuickAddModal 
+          onClose={() => setShowQuickAddModal(false)}
+          onConfirm={handleQuickAdd}
+          currentCounts={stickerCounts}
+        />
+      )}
+      
+      {showExportModal && (
+        <ExportModal 
+          onClose={() => setShowExportModal(false)}
+          uid={user?.uid}
+          counts={stickerCounts}
+        />
+      )}
+      
+      {showImportModal && (
+        <ImportModal 
+          onClose={() => setShowImportModal(false)}
+          onImport={handleImportJSON}
+        />
+      )}
+      
+      {quantityTarget && (
+        <QuantityModal 
+          stickerId={quantityTarget.id}
+          currentCount={quantityTarget.count}
+          onClose={() => setQuantityTarget(null)}
+          onSave={async (newCount) => {
+             setQuantityTarget(null);
+             await setStickerCount(quantityTarget.id, newCount);
+          }}
+        />
+      )}
 
       {/* Header Panel */}
       <header className="bg-[#1a0505] text-stone-200 mt-3 mx-2.5 md:mt-6 md:mx-8 p-3 md:p-6 border border-stone-800 rounded-xl md:rounded-2xl shadow-xl relative overflow-hidden">
@@ -1316,6 +1442,7 @@ export default function App() {
                 📊 Estatísticas
               </button>
               <button
+                id="tab-social"
                 onClick={() => { setActiveTab("social"); }}
                 className={`px-4 py-2 rounded-lg text-xs md:text-sm font-bold uppercase tracking-wider smooth-transition flex items-center gap-1 ${
                   activeTab === "social" || viewingFriend ? "bg-[#6b0b0b] text-white border border-[#d4af37]/20 shadow" : "text-stone-400 hover:text-stone-100 hover:bg-white/5"
@@ -1326,9 +1453,17 @@ export default function App() {
               </button>
             </div>
 
+            <button
+              onClick={() => setShowSettingsModal(true)}
+              className="p-1.5 bg-stone-900 border border-stone-800 hover:bg-stone-800 rounded-xl text-stone-400 hover:text-stone-200 smooth-transition min-h-[38px] min-w-[38px] flex items-center justify-center shadow-lg"
+              title="Configurações"
+            >
+              <Settings className="w-4 h-4 md:w-5 md:h-5" />
+            </button>
+
             {/* Auth Block */}
             {profile ? (
-              <div className="flex items-center gap-1.5 md:gap-3 bg-stone-900 border border-stone-800 p-1 md:p-1.5 md:pr-3 rounded-full">
+              <div className="flex items-center gap-1.5 md:gap-3 bg-stone-900 border border-stone-800 p-1 md:p-1.5 md:pr-3 rounded-full hidden sm:flex">
                 <img
                   src={profile.photoURL}
                   alt={profile.name}
@@ -1338,20 +1473,6 @@ export default function App() {
                   <p className="text-xs font-bold leading-none text-stone-200">{profile.name}</p>
                   <p className="text-[10px] text-stone-500 uppercase font-bold tracking-tighter mt-0.5">Colecionador</p>
                 </div>
-                <button
-                  onClick={() => setShowRecoveryModal(true)}
-                  className="p-1.5 hover:bg-white/10 rounded-full text-stone-400 hover:text-stone-200 smooth-transition min-h-[36px] min-w-[36px] flex items-center justify-center"
-                  title="Configurações e Recuperação"
-                >
-                  <Settings className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={handleLogout}
-                  className="p-1.5 hover:bg-white/10 rounded-full text-stone-400 hover:text-rose-400 smooth-transition min-h-[36px] min-w-[36px] flex items-center justify-center"
-                  title="Desconectar"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
               </div>
             ) : (
               <button
@@ -1407,8 +1528,8 @@ export default function App() {
                   <span className="text-xs font-black text-[#f87171]">{globalMissingCount}</span>
                 </div>
                 <div className="bg-stone-900 border border-stone-800/80 rounded-lg px-2 py-0.5 text-center min-w-[64px]">
-                  <span className="text-[7px] text-stone-500 font-bold uppercase block">Repetidas</span>
-                  <span className="text-xs font-black text-[#fbbf24]">{repeatedStickers.length}</span>
+                  <span className="text-[7px] text-stone-500 font-bold uppercase block">Extras</span>
+                  <span className="text-xs font-black text-[#fbbf24]">{Object.values(stickerCounts).reduce((acc: number, count: number) => acc + Math.max(0, count - 1), 0)}</span>
                 </div>
               </div>
             </div>
@@ -1510,8 +1631,8 @@ export default function App() {
               <div className="h-8 w-px bg-stone-800 hidden sm:block" />
 
               <div className="text-right sm:text-left">
-                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Repetidas</span>
-                <span className="text-xl font-black text-[#d4af37]">{repeatedStickers.length}</span>
+                <span className="text-[10px] text-stone-500 font-extrabold uppercase tracking-widest block">Extras</span>
+                <span className="text-xl font-black text-[#d4af37]">{Object.values(stickerCounts).reduce((acc: number, count: number) => acc + Math.max(0, count - 1), 0)}</span>
               </div>
             </div>
 
@@ -1941,7 +2062,16 @@ export default function App() {
                                   >
                                     <Minus className="w-3.5 h-3.5" />
                                   </button>
-                                  <span className="text-[10px] text-stone-200 font-mono font-bold select-none">{count}</span>
+                                  <span 
+                                    className="text-[10px] text-stone-200 font-mono font-bold select-none px-2 py-1 bg-stone-900 rounded cursor-pointer hover:bg-stone-800"
+                                    onClick={(e) => {
+                                       e.stopPropagation();
+                                       setQuantityTarget({ id: stickerId, count });
+                                    }}
+                                    title="Definir quantidade exata"
+                                  >
+                                    {count}
+                                  </span>
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -1977,7 +2107,7 @@ export default function App() {
               </h2>
               <p className="text-stone-400 text-sm mt-1 font-sans">
                 Selecione a página exata do seu álbum físico, carregue uma foto nítida e deixe a IA identificar as figurinhas coladas. 
-                <strong className="text-[#d4af37] block mt-1">Regra de ouro: Você tem direito a 1 leitura válida por ID de página para garantir exatidão!</strong>
+                <strong className="text-[#d4af37] block mt-1">Cada página possui uma leitura automática. Depois, você pode ajustar as quantidades manualmente.</strong>
               </p>
             </div>
 
@@ -2017,7 +2147,7 @@ export default function App() {
                     <div className="bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] rounded-lg p-3 font-semibold mt-2 flex items-start gap-2 animate-pulse">
                       <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                       <span>
-                        Você já concluiu a leitura desta página. Novas análises com fotos para este ID estão bloqueadas para seguir a regra de apenas 1 leitura válida por usuário. Você pode continuar modificando as quantidades no álbum manualmente.
+                        Você já concluiu a leitura automática desta página. Você pode continuar modificando as quantidades no álbum manualmente.
                       </span>
                     </div>
                   ) : (
@@ -2040,6 +2170,7 @@ export default function App() {
                   <input
                     type="file"
                     accept="image/*"
+                    capture="environment"
                     onChange={handleFileChange}
                     disabled={completedPages.includes(selectedPageId) || scanStatus === "processing" || scanStatus === "uploading" || scanStatus === "saving"}
                     className="absolute inset-0 opacity-0 cursor-pointer w-full h-full disabled:cursor-not-allowed"
@@ -2236,32 +2367,66 @@ export default function App() {
           <div className="space-y-6">
             
             {/* Top Cards Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-4 shadow-2xl">
+                <h3 className="text-stone-500 font-extrabold uppercase text-[9px] tracking-wider">Coladas</h3>
+                <p className="text-xl font-black text-emerald-400 mt-1 font-display">{ownedStickers.length}</p>
+              </div>
+              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-4 shadow-2xl">
+                <h3 className="text-stone-500 font-extrabold uppercase text-[9px] tracking-wider">Tipos Repetidos</h3>
+                <p className="text-xl font-black text-[#d4af37] mt-1 font-display">{repeatedStickers.length}</p>
+              </div>
+              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-4 shadow-2xl">
+                <h3 className="text-stone-500 font-extrabold uppercase text-[9px] tracking-wider">Extras</h3>
+                <p className="text-xl font-black text-amber-500 mt-1 font-display">
+                  {Object.values(stickerCounts).reduce((acc: number, count: number) => acc + Math.max(0, count - 1), 0)}
+                </p>
+              </div>
+              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-4 shadow-2xl">
+                <h3 className="text-stone-500 font-extrabold uppercase text-[9px] tracking-wider">Total Físico</h3>
+                <p className="text-xl font-black text-stone-200 mt-1 font-display">
+                  {Object.values(stickerCounts).reduce((acc: number, count: number) => acc + count, 0)}
+                </p>
+              </div>
+            </div>
+
+            {/* List of Extras */}
+            <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl">
+              <h3 className="text-lg font-black text-stone-100 uppercase tracking-wide mb-4 border-b border-stone-800 pb-3 flex items-center justify-between font-display">
+                <div className="flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5 text-amber-500" />
+                  <span>Minhas Repetidas</span>
+                </div>
+              </h3>
               
-              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl flex flex-col justify-between">
-                <div>
-                  <h3 className="text-stone-500 font-extrabold uppercase text-[10px] tracking-wider">País Mais Completo</h3>
-                  <p className="text-2xl font-black text-emerald-400 mt-2 font-display">{statsInsights.bestTeam}</p>
+              <div className="mb-4">
+                <div className="relative max-w-sm">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-500" />
+                  <input
+                    type="text"
+                    placeholder="Buscar repetida (ex: BRA 3)"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-stone-900 border border-stone-800 text-stone-200 rounded-lg pl-9 pr-4 py-2 text-sm focus:outline-none focus:border-[#d4af37]"
+                  />
                 </div>
-                <p className="text-xs text-stone-500 mt-4 font-sans">A seleção na qual você reuniu mais figurinhas até agora.</p>
               </div>
 
-              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl flex flex-col justify-between">
-                <div>
-                  <h3 className="text-stone-500 font-extrabold uppercase text-[10px] tracking-wider">Grupo Mais Próximo</h3>
-                  <p className="text-2xl font-black text-[#d4af37] mt-2 font-display">{statsInsights.bestGroup}</p>
-                </div>
-                <p className="text-xs text-stone-500 mt-4 font-sans">O grupo mais próximo de completar todas as figurinhas.</p>
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 max-h-96 overflow-y-auto custom-scrollbar pr-2">
+                {repeatedStickers
+                  .filter(id => !searchQuery || stickersMap[id]?.label.toLowerCase().includes(searchQuery.toLowerCase()))
+                  .sort((a, b) => (stickerCounts[b] - 1) - (stickerCounts[a] - 1))
+                  .map(id => (
+                    <div key={id} className="bg-stone-900 border border-stone-800 p-3 rounded-lg text-center flex flex-col justify-center cursor-pointer hover:bg-stone-800" onClick={() => setQuantityTarget({ id, count: stickerCounts[id] })}>
+                      <span className="font-bold text-stone-300 block text-sm">{stickersMap[id]?.label || id}</span>
+                      <span className="text-xs text-amber-500 font-bold mt-1">{(stickerCounts[id] - 1)} extras</span>
+                    </div>
+                  ))
+                }
+                {repeatedStickers.length === 0 && (
+                  <div className="col-span-full text-center text-stone-500 text-sm py-4">Nenhuma figurinha repetida ainda.</div>
+                )}
               </div>
-
-              <div className="bg-[#1a0505] border border-stone-800 rounded-2xl p-6 shadow-2xl flex flex-col justify-between">
-                <div>
-                  <h3 className="text-stone-500 font-extrabold uppercase text-[10px] tracking-wider">Status do Colecionador</h3>
-                  <p className="text-2xl font-black text-rose-400 mt-2 font-display">{statsInsights.rank}</p>
-                </div>
-                <p className="text-xs text-stone-500 mt-4 font-sans">Sua categoria atualizada dinamicamente com base no seu preenchimento.</p>
-              </div>
-
             </div>
 
             {/* Detailed countries progression */}
@@ -2303,40 +2468,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Backup & System reset panel */}
-            <div className="bg-[#1a0505] border border-stone-800 text-stone-200 rounded-2xl p-6 shadow-2xl space-y-4 text-left">
-              <h3 className="text-lg font-black text-amber-400 uppercase tracking-wide font-display">⚙️ Gerenciamento Técnico do Álbum</h3>
-              <p className="text-xs text-stone-500 font-sans">
-                Gerencie seus códigos de backup locais, restaure dados de fotos de teste offline ou redefina o progresso total de forma segura.
-              </p>
-              <div className="flex flex-wrap gap-3 pt-2">
-                <button
-                  onClick={exportStateCode}
-                  className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
-                >
-                  📥 Exportar Backup
-                </button>
-                <button
-                  onClick={importStateCode}
-                  className="bg-stone-900 hover:bg-stone-800 border border-stone-800 text-stone-300 text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
-                >
-                  📤 Importar Backup
-                </button>
-                <button
-                  onClick={resetToPhotos}
-                  className="bg-amber-600/90 hover:bg-amber-700 text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
-                >
-                  📸 Restaurar Fotos Originais
-                </button>
-                <button
-                  onClick={clearProgressTotal}
-                  className="bg-rose-700/90 hover:bg-rose-800 text-white text-xs font-bold uppercase px-4 py-3 rounded-xl transition cursor-pointer"
-                >
-                  🚨 Zerar Tudo
-                </button>
-              </div>
-            </div>
-
           </div>
         )}
 
@@ -2372,17 +2503,51 @@ export default function App() {
                         onClick={() => {
                           const url = `${window.location.origin}${window.location.pathname}?share=${myShareId}`;
                           navigator.clipboard.writeText(url);
-                          showToast("Link de comparação copiado!", "success");
+                          showToast("Link copiado!", "success");
                         }}
                         className="bg-[#6b0b0b] hover:bg-[#8f1212] border border-[#d4af37]/20 text-white px-3 py-1.5 rounded-lg text-xs font-bold uppercase smooth-transition"
                       >
                         Copiar Link
                       </button>
                     </div>
-                    <div className="flex justify-end">
+                    <div className="flex flex-wrap gap-2 justify-end">
+                      <button
+                        onClick={() => {
+                          let text = `*Minhas Trocas de Figurinhas*\n\n`;
+                          text += `Preciso de ${globalMissingCount} figurinhas.\n`;
+                          text += `Tenho ${repeatedStickers.length} figurinhas para trocar.\n\n`;
+                          text += `Compare nossas listas ao vivo:\n`;
+                          text += `${window.location.origin}${window.location.pathname}?share=${myShareId}`;
+                          navigator.clipboard.writeText(text);
+                          showToast("Resumo copiado!", "success");
+                        }}
+                        className="text-[10px] text-stone-400 hover:text-stone-300 bg-stone-800 hover:bg-stone-700 px-2 py-1 rounded uppercase font-bold tracking-widest transition"
+                      >
+                        Copiar Resumo
+                      </button>
+                      <button
+                        onClick={() => {
+                          let text = `*Minhas Trocas de Figurinhas*\n\n`;
+                          text += `Preciso de ${globalMissingCount} figurinhas.\n`;
+                          text += `Tenho ${repeatedStickers.length} figurinhas para trocar.\n\n`;
+                          text += `Compare nossas listas ao vivo:\n`;
+                          text += `${window.location.origin}${window.location.pathname}?share=${myShareId}`;
+                          window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
+                        }}
+                        className="text-[10px] text-emerald-500 hover:text-emerald-400 bg-emerald-950 hover:bg-emerald-900 px-2 py-1 rounded uppercase font-bold tracking-widest transition"
+                      >
+                        WhatsApp
+                      </button>
+                      <button
+                        onClick={generateMyShareLink}
+                        className="text-[10px] text-blue-500 hover:text-blue-400 bg-blue-950 hover:bg-blue-900 px-2 py-1 rounded uppercase font-bold tracking-widest transition"
+                        title="Atualizar lista na nuvem"
+                      >
+                        Atualizar Lista
+                      </button>
                       <button
                         onClick={disableMyShare}
-                        className="text-[10px] text-rose-500 hover:text-rose-400 uppercase font-bold tracking-widest"
+                        className="text-[10px] text-rose-500 hover:text-rose-400 bg-rose-950 hover:bg-rose-900 px-2 py-1 rounded uppercase font-bold tracking-widest transition"
                       >
                         Desativar Código
                       </button>
@@ -2432,6 +2597,43 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+
+                {savedFriends.length > 0 && (
+                  <div className="pt-4 border-t border-stone-800/50 space-y-3">
+                    <h4 className="text-xs font-bold text-stone-400 uppercase tracking-widest">Amigos Salvos</h4>
+                    <div className="flex flex-col gap-2 max-h-48 overflow-y-auto custom-scrollbar pr-2">
+                      {savedFriends.map((friend) => (
+                        <div key={friend.shareId} className="flex items-center justify-between bg-stone-950/50 border border-stone-800 rounded-xl p-2.5">
+                          <div className="flex items-center gap-3">
+                            <img src={friend.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80"} alt={friend.displayName} className="w-8 h-8 rounded-full border border-stone-800" />
+                            <div>
+                              <p className="text-sm font-bold text-stone-200 leading-none">{friend.displayName}</p>
+                              <p className="text-[10px] text-stone-500 font-mono mt-1">{friend.shareId}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setFriendShareId(friend.shareId);
+                                loadFriendShare(friend.shareId);
+                              }}
+                              className="text-[10px] bg-stone-800 hover:bg-stone-700 text-stone-300 px-3 py-1.5 rounded uppercase font-bold smooth-transition"
+                            >
+                              Abrir
+                            </button>
+                            <button
+                              onClick={() => removeFriendContact(friend.shareId)}
+                              className="text-rose-500 hover:bg-rose-950 p-1.5 rounded smooth-transition"
+                              title="Remover"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
             </div>
@@ -2449,8 +2651,41 @@ export default function App() {
                     <Sparkles className="w-5 h-5 text-amber-500 animate-spin" style={{ animationDuration: "12s" }} />
                     <span>⚡ Algoritmo de Matches de Troca Ideais</span>
                   </h3>
-                  <div className="flex items-center gap-1 text-xs">
-                    <span className="bg-[#6b0b0b] text-white border border-[#d4af37]/25 font-black px-2 py-0.5 rounded uppercase text-[9px]">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <button
+                      onClick={saveFriendContact}
+                      className="bg-emerald-950 hover:bg-emerald-900 text-emerald-400 border border-emerald-500/25 font-bold px-3 py-1 rounded uppercase text-[10px] smooth-transition"
+                    >
+                      Salvar Contato
+                    </button>
+                    <button
+                      onClick={() => {
+                         let text = `*Proposta de Troca com ${friendProfile.name}*\n\n`;
+                         if (matchTrades.canGive.length > 0) {
+                            text += `*Posso te dar:*\n`;
+                            matchTrades.canGive.forEach(({ id, extraQuantity }) => {
+                               text += `- ${stickersMap[id]?.label || id.replace("_", " ")} (${extraQuantity} extras)\n`;
+                            });
+                            text += `\n`;
+                         }
+                         if (matchTrades.canGet.length > 0) {
+                            text += `*Preciso de você:*\n`;
+                            matchTrades.canGet.forEach(({ id, extraQuantity }) => {
+                               text += `- ${stickersMap[id]?.label || id.replace("_", " ")} (${extraQuantity} extras)\n`;
+                            });
+                            text += `\n`;
+                         }
+                         if (matchTrades.canGive.length === 0 && matchTrades.canGet.length === 0) {
+                            text += `Nenhuma troca direta encontrada dessa vez.\n`;
+                         }
+                         navigator.clipboard.writeText(text);
+                         showToast("Proposta de troca copiada!", "success");
+                      }}
+                      className="bg-blue-950 hover:bg-blue-900 text-blue-400 border border-blue-500/25 font-bold px-3 py-1 rounded uppercase text-[10px] smooth-transition"
+                    >
+                      Copiar Proposta
+                    </button>
+                    <span className="bg-[#6b0b0b] text-white border border-[#d4af37]/25 font-black px-2 py-1 rounded uppercase text-[10px]">
                       Holograma Ativo
                     </span>
                   </div>
@@ -2465,13 +2700,14 @@ export default function App() {
                     </p>
                     {matchTrades.canGive.length > 0 ? (
                       <div className="flex flex-wrap gap-2 mt-3">
-                        {matchTrades.canGive.map((id) => (
+                        {matchTrades.canGive.map(({ id, extraQuantity }) => (
                           <span
                             key={id}
                             className="perfect-trade-shine text-stone-950 text-xs font-black px-3 py-1.5 rounded-xl flex items-center gap-1 border border-amber-400 shadow-md animate-pulse"
+                            title={`${stickersMap[id]?.label || id.replace("_", " ")}`}
                           >
                             <Sparkles className="w-3.5 h-3.5 text-stone-950" />
-                            <span>{id.replace("_", " ")}</span>
+                            <span>{id.replace("_", " ")} ({extraQuantity})</span>
                           </span>
                         ))}
                       </div>
@@ -2487,13 +2723,14 @@ export default function App() {
                     </p>
                     {matchTrades.canGet.length > 0 ? (
                       <div className="flex flex-wrap gap-2 mt-3">
-                        {matchTrades.canGet.map((id) => (
+                        {matchTrades.canGet.map(({ id, extraQuantity }) => (
                           <span
                             key={id}
                             className="perfect-trade-shine text-stone-950 text-xs font-black px-3 py-1.5 rounded-xl flex items-center gap-1 border border-amber-400 shadow-md animate-pulse"
+                            title={`${stickersMap[id]?.label || id.replace("_", " ")}`}
                           >
                             <Sparkles className="w-3.5 h-3.5 text-stone-950" />
-                            <span>{id.replace("_", " ")}</span>
+                            <span>{id.replace("_", " ")} ({extraQuantity})</span>
                           </span>
                         ))}
                       </div>
